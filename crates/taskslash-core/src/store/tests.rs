@@ -292,3 +292,33 @@ fn history_takes_a_limit_and_a_directory() {
     assert_eq!(store.history("k", 2, Some("shop")).unwrap().len(), 2);
     assert!(store.history("k", 20, Some("hop")).unwrap().is_empty());
 }
+
+#[test]
+fn a_database_on_disk_is_written_ahead_and_not_synced_on_every_row() {
+    let dir = std::env::temp_dir().join(format!("tks-wal-{}", std::process::id()));
+    // A failed earlier run with the same pid may have left its row.
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir.join("runs.db")).unwrap();
+    let pragma = |name: &str| -> String {
+        store
+            .conn
+            .query_row(&format!("PRAGMA {name}"), [], |row| {
+                row.get::<_, rusqlite::types::Value>(0)
+            })
+            .map(|v| format!("{v:?}"))
+            .unwrap()
+    };
+    assert_eq!(pragma("journal_mode"), "Text(\"wal\")");
+    // 1 is NORMAL: a commit in WAL mode then waits for no fsync.
+    assert_eq!(pragma("synchronous"), "Integer(1)");
+    let argv = words(&["true"]);
+    store
+        .record(&finished(&argv, Launch::Plain, 1, Cost::default()))
+        .unwrap();
+    drop(store);
+    // Opened again, the row is there.
+    let store = Store::open(&dir.join("runs.db")).unwrap();
+    assert_eq!(store.history("k", 5, None).unwrap().len(), 1);
+    drop(store);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

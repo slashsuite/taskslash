@@ -36,18 +36,18 @@ target/release/floor-bench --taskslash target/release/taskslash
 Example output (100 runs each, on an idle desktop):
 
 ```
-machine: load 1.92 cpu pressure 0.09%
-bare       min    0.358  median    0.449  p95    0.532  p99    0.685  max    1.008  ms (100 runs)
-floor      min    0.891  median    1.013  p95    1.262  p99    1.281  max    1.345  ms (100 runs)
-taskslash  min   14.150  median   26.519  p95   34.964  p99   37.893  max   38.668  ms (100 runs)
-  connect  min    0.009  median    0.012  p95    0.016  p99    0.018  max    0.019  ms
-  admit    min    0.273  median    0.345  p95    0.431  p99    0.541  max    0.544  ms
-  launch   min    1.660  median    1.860  p95    2.258  p99    2.394  max    2.733  ms
-  command  min    3.854  median   12.541  p95   20.363  p99   22.489  max   22.903  ms
-  drain    min    0.001  median    0.016  p95    0.030  p99    0.041  max    0.067  ms
-  report   min    7.156  median   10.505  p95   14.524  p99   17.007  max   17.429  ms
-  other    min    0.959  median    1.138  p95    1.266  p99    1.287  max    1.310  ms
-{"runs":100,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"7b8fe80","load_1m":1.92,"cpu_pressure_some_avg10":0.09,"busy":false,"rows":[...]}
+machine: load 1.65 cpu pressure 0.00%
+bare       min    0.341  median    0.398  p95    0.476  p99    0.532  max    0.535  ms (100 runs)
+floor      min    0.854  median    0.943  p95    1.007  p99    1.041  max    1.097  ms (100 runs)
+taskslash  min    6.491  median    6.961  p95    7.928  p99    8.653  max   18.897  ms (100 runs)
+  connect  min    0.010  median    0.011  p95    0.015  p99    0.017  max    0.020  ms
+  admit    min    0.139  median    0.169  p95    0.208  p99    0.259  max    0.265  ms
+  launch   min    1.537  median    1.712  p95    2.037  p99    2.256  max    2.370  ms
+  command  min    3.538  median    3.888  p95    4.342  p99    4.421  max   15.387  ms
+  drain    min    0.001  median    0.015  p95    0.026  p99    0.028  max    0.044  ms
+  report   min    0.186  median    0.226  p95    0.304  p99    0.332  max    0.343  ms
+  other    min    0.837  median    0.964  p95    1.123  p99    1.201  max    1.314  ms
+{"runs":100,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"c473414","load_1m":1.65,"cpu_pressure_some_avg10":0.00,"busy":false,"rows":[...]}
 ```
 
 ## Reading it
@@ -70,9 +70,13 @@ like the rows are:
 - `admit`: from `submit` to the daemon's `start`. A job held by a pressure gate waits here.
 - `launch`: from `start` to the command spawned (the log opened, the executable checked).
 - `command`: from the spawn to the command's exit. On a machine with a user session this includes
-  `systemd-run` setting up the job's scope, most of the start.
+  `systemd-run` setting up the job's scope, most of the start. Started back to back the scope takes
+  3 to 4 ms; after a gap of 50 ms or more, or on a machine that was just busy, systemd and the CPU
+  wake cold and it takes 12 to 14 ms. That spread is systemd's, not TaskSlash's.
 - `drain`: from the exit to the last of the command's output copied.
-- `report`: from there to the daemon's `recorded`: `exited` sent and the run's row written.
+- `report`: from there to the daemon's `recorded`: `exited` sent and the run's row written. The
+  database is in WAL mode with `synchronous = NORMAL`, so the write waits for no fsync but a
+  checkpoint's (under 0.5 ms; in SQLite's default journal it was 8 to 11 ms on btrfs).
 - `other`: the rest of the start to exit time, the client process starting and exiting.
 
 The machine line and the JSON carry the 1-minute load average and CPU pressure (`some avg10`) read
