@@ -1,7 +1,8 @@
 //! `floor-bench [--runs N] [--taskslash <path>]`: times N starts of each row, spawn to exit, and
 //! prints min, median, p95, p99 and max in milliseconds, one line per row, then the `taskslash`
 //! row's phases, then one JSON line with every row and phase, the versions, the repo commit and the
-//! machine's state at the start (1-minute load, CPU pressure, and whether that reads as busy).
+//! machine's state at the start (1-minute load, CPU, memory and I/O pressure, and whether that
+//! reads as busy).
 //!
 //! Rows: `bare` runs `true` directly, `floor` runs it through `taskslash-floor` (the sibling binary
 //! in this target directory), `taskslash` through `taskslash run`. The command's output goes to
@@ -22,8 +23,10 @@ use std::time::Instant;
 const DEFAULT_RUNS: usize = 100;
 /// The phases `taskslash run` reports, in order.
 const PHASES: [&str; 6] = ["connect", "admit", "launch", "command", "drain", "report"];
+/// The index of `admit` in `PHASES`.
+const ADMIT: usize = 1;
 /// A machine is busy, and its numbers read high, past either: the 1-minute load average, or the
-/// CPU pressure `some avg10` in percent.
+/// CPU pressure `some avg10` in percent. A run whose job a gate held is busy too (`Held`).
 const BUSY_LOAD: f64 = 2.0;
 const BUSY_CPU_PRESSURE: f64 = 5.0;
 const USAGE: &str = "usage: floor-bench [--runs N] [--taskslash <path>]";
@@ -69,6 +72,13 @@ impl Stats {
 /// Each phase's name and stats, in order.
 type PhaseStats = Vec<(&'static str, Stats)>;
 
+/// The runs a gate held in `admit`: how many, and the first one's admit time and reason.
+#[derive(Default)]
+struct Held {
+    runs: usize,
+    first: Option<(f64, String)>,
+}
+
 enum Outcome {
     Timed(Stats),
     Skipped(&'static str),
@@ -87,13 +97,17 @@ fn time(argv: &[String], runs: usize) -> Result<Stats, String> {
     Ok(time_phases(argv, runs, false)?.0)
 }
 
+/// The phase stats and held runs of `time_phases`.
+type Phased = (Stats, PhaseStats, Held);
+
 /// `time`, and with `phases` each phase's samples from the `taskslash: phases` line the run
 /// writes on stderr, in `PHASES` order and then `other` (the rest of the run's time). A run with
-/// no such line is an error.
-fn time_phases(argv: &[String], runs: usize, phases: bool) -> Result<(Stats, PhaseStats), String> {
+/// no such line is an error. A run whose stderr says it was waiting is counted as held.
+fn time_phases(argv: &[String], runs: usize, phases: bool) -> Result<Phased, String> {
     let (program, args) = argv.split_first().ok_or("empty command")?;
     let mut samples = Vec::with_capacity(runs);
     let mut phase_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(runs); PHASES.len() + 1];
+    let mut held = Held::default();
     for _ in 0..runs {
         let mut command = Command::new(program);
         command
@@ -127,6 +141,11 @@ fn time_phases(argv: &[String], runs: usize, phases: bool) -> Result<(Stats, Pha
                 seen += ms;
             }
             phase_samples[PHASES.len()].push(elapsed - seen);
+            if let Some(reason) = waiting_reason(&stderr) {
+                held.runs += 1;
+                held.first
+                    .get_or_insert_with(|| (took[ADMIT], reason.to_string()));
+            }
         }
     }
     let names = PHASES.iter().copied().chain(["other"]);
@@ -138,7 +157,17 @@ fn time_phases(argv: &[String], runs: usize, phases: bool) -> Result<(Stats, Pha
     } else {
         Vec::new()
     };
-    Ok((Stats::of(&mut samples), phase_stats))
+    Ok((Stats::of(&mut samples), phase_stats, held))
+}
+
+/// The reason from the first `taskslash: job N waiting ...: <reason>` line in `stderr`, the line
+/// `taskslash run` writes when admission holds its job.
+fn waiting_reason(stderr: &str) -> Option<&str> {
+    stderr.lines().find_map(|l| {
+        let rest = l.strip_prefix("taskslash: job ")?;
+        rest.contains(" waiting ").then_some(())?;
+        Some(rest.split_once("): ")?.1)
+    })
 }
 
 /// Each of `PHASES` from the last `taskslash: phases ...` line in `stderr`, in that order; a phase
@@ -184,22 +213,42 @@ fn answers(program: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// CPU pressure `some avg10` from `/proc/pressure/cpu`, in percent.
-fn cpu_pressure() -> Option<f64> {
-    fs::read_to_string("/proc/pressure/cpu")
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("some "))?
+/// The machine's pressure `avg10` figures, in percent; `None` where one cannot be read.
+#[derive(Clone, Copy)]
+struct Pressure {
+    cpu_some: Option<f64>,
+    memory_some: Option<f64>,
+    io_some: Option<f64>,
+    io_full: Option<f64>,
+}
+
+impl Pressure {
+    fn read() -> Self {
+        let file = |name: &str| fs::read_to_string(format!("/proc/pressure/{name}")).ok();
+        let (cpu, memory, io) = (file("cpu"), file("memory"), file("io"));
+        Self {
+            cpu_some: cpu.as_deref().and_then(|t| avg10(t, "some")),
+            memory_some: memory.as_deref().and_then(|t| avg10(t, "some")),
+            io_some: io.as_deref().and_then(|t| avg10(t, "some")),
+            io_full: io.as_deref().and_then(|t| avg10(t, "full")),
+        }
+    }
+}
+
+/// `avg10` of the `kind` line (`some` or `full`) of a `/proc/pressure` file's `text`.
+fn avg10(text: &str, kind: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|l| l.strip_prefix(kind)?.strip_prefix(' '))?
         .split_whitespace()
         .find_map(|w| w.strip_prefix("avg10="))?
         .parse()
         .ok()
 }
 
-/// Whether a machine at `load` and `pressure` is too busy for comparable numbers. One that
-/// cannot be read is not called busy.
-fn busy(load: Option<f64>, pressure: Option<f64>) -> bool {
-    load.is_some_and(|l| l > BUSY_LOAD) || pressure.is_some_and(|p| p > BUSY_CPU_PRESSURE)
+/// Whether a machine at `load` and CPU pressure `cpu` is too busy for comparable numbers. One
+/// that cannot be read is not called busy.
+fn busy(load: Option<f64>, cpu: Option<f64>) -> bool {
+    load.is_some_and(|l| l > BUSY_LOAD) || cpu.is_some_and(|p| p > BUSY_CPU_PRESSURE)
 }
 
 fn load_1m() -> Option<f64> {
@@ -284,8 +333,7 @@ fn run(options: &Options) -> Result<(), String> {
     let floor = floor_binary()?;
     // Read before the first start, so the runs' own load is not counted.
     let load = load_1m();
-    let pressure = cpu_pressure();
-    let busy = busy(load, pressure);
+    let pressure = Pressure::read();
     let strings = |argv: &[&str]| argv.iter().map(ToString::to_string).collect::<Vec<_>>();
     let mut rows = vec![
         Row {
@@ -304,8 +352,8 @@ fn run(options: &Options) -> Result<(), String> {
     ];
     let taskslash = options.taskslash.as_str();
     let answering = answers(taskslash);
-    let (outcome, phases) = if answering {
-        let (stats, phases) = time_phases(
+    let (outcome, phases, held) = if answering {
+        let (stats, phases, held) = time_phases(
             &strings(&[
                 taskslash,
                 "run",
@@ -321,19 +369,29 @@ fn run(options: &Options) -> Result<(), String> {
             options.runs,
             true,
         )?;
-        (Outcome::Timed(stats), phases)
+        (Outcome::Timed(stats), phases, held)
     } else {
-        (Outcome::Skipped("daemon not answering"), Vec::new())
+        (
+            Outcome::Skipped("daemon not answering"),
+            Vec::new(),
+            Held::default(),
+        )
     };
+    // A run the daemon held waited on a gate, so its admit is the gate's, not TaskSlash's.
+    let busy = busy(load, pressure.cpu_some) || held.runs > 0;
     rows.push(Row {
         name: "taskslash",
         outcome,
         phases,
     });
+    let shown = |v: Option<f64>| v.map_or_else(|| "?".to_string(), |v| format!("{v:.2}"));
     let state = format!(
-        "machine: load {} cpu pressure {}%{}",
-        load.map_or_else(|| "?".to_string(), |l| format!("{l:.2}")),
-        pressure.map_or_else(|| "?".to_string(), |p| format!("{p:.2}")),
+        "machine: load {} pressure cpu {}% memory {}% io some {}% io full {}%{}",
+        shown(load),
+        shown(pressure.cpu_some),
+        shown(pressure.memory_some),
+        shown(pressure.io_some),
+        shown(pressure.io_full),
         if busy {
             "  BUSY: the numbers read high, do not compare them"
         } else {
@@ -341,6 +399,14 @@ fn run(options: &Options) -> Result<(), String> {
         }
     );
     println!("{state}");
+    if let Some((admit, reason)) = &held.first {
+        println!(
+            "held: {} of {} runs waited in admit, the first {:.1} s: {reason}",
+            held.runs,
+            options.runs,
+            admit / 1000.0
+        );
+    }
 
     let mut json_rows = Vec::new();
     for row in &rows {
@@ -387,13 +453,18 @@ fn run(options: &Options) -> Result<(), String> {
         .unwrap_or_else(|| "unknown".to_string());
     let number = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |v| format!("{v:.2}"));
     println!(
-        "{{\"runs\":{},\"floor_version\":{},\"taskslash_version\":{},\"commit\":{},\"load_1m\":{},\"cpu_pressure_some_avg10\":{},\"busy\":{busy},\"rows\":[{}]}}",
+        "{{\"runs\":{},\"floor_version\":{},\"taskslash_version\":{},\"commit\":{},\"load_1m\":{},\"cpu_pressure_some_avg10\":{},\"memory_pressure_some_avg10\":{},\"io_pressure_some_avg10\":{},\"io_pressure_full_avg10\":{},\"held_runs\":{},\"held_reason\":{},\"busy\":{busy},\"rows\":[{}]}}",
         options.runs,
         json_string(env!("CARGO_PKG_VERSION")),
         json_or_null(taskslash_version.as_deref()),
         json_string(&commit),
         number(load),
-        number(pressure),
+        number(pressure.cpu_some),
+        number(pressure.memory_some),
+        number(pressure.io_some),
+        number(pressure.io_full),
+        held.runs,
+        json_or_null(held.first.as_ref().map(|(_, r)| r.as_str())),
         json_rows.join(",")
     );
     Ok(())
@@ -421,7 +492,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{busy, parse_phases, percentile};
+    use super::{avg10, busy, parse_phases, percentile, waiting_reason};
 
     #[test]
     fn phases_are_read_from_the_last_phases_line_in_order() {
@@ -442,6 +513,28 @@ mod tests {
         assert!(busy(Some(2.5), Some(0.0)));
         assert!(busy(Some(0.5), Some(12.0)));
         assert!(!busy(None, None));
+    }
+
+    #[test]
+    fn a_held_run_is_known_by_its_waiting_line() {
+        let stderr = "taskslash: job 1 waiting 0s (1st in line): io full pressure 12% over the 5% gate\ntaskslash: job 1 waiting 15s (1st in line): io full pressure 12% over the 5% gate\ntaskslash: phases connect=0.026 admit=180039.744 launch=2.377 command=8.562 drain=0.016 report=0.258 ms\n";
+        assert_eq!(
+            waiting_reason(stderr),
+            Some("io full pressure 12% over the 5% gate")
+        );
+        assert_eq!(
+            waiting_reason("taskslash: phases connect=0.01 admit=0.2 ms\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn avg10_is_read_from_the_some_or_the_full_line() {
+        let io = "some avg10=14.00 avg60=10.00 avg300=3.00 total=1\nfull avg10=12.50 avg60=9.00 avg300=2.00 total=1\n";
+        assert_eq!(avg10(io, "some"), Some(14.0));
+        assert_eq!(avg10(io, "full"), Some(12.5));
+        assert_eq!(avg10("some avg60=1.00", "some"), None);
+        assert_eq!(avg10("", "full"), None);
     }
 
     #[test]
