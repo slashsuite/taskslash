@@ -36,18 +36,18 @@ target/release/floor-bench --taskslash target/release/taskslash
 Example output (50 runs each, on a desktop with other builds running, so the load marks it busy):
 
 ```
-machine: load 7.72 pressure cpu 1.53% memory 0.00% io some 3.23% io full 2.16%  BUSY: the numbers read high, do not compare them
-bare       min    0.345  median    0.379  p95    0.473  p99    0.496  max    0.496  ms (50 runs)
-floor      min    0.863  median    0.948  p95    1.072  p99    1.099  max    1.099  ms (50 runs)
-taskslash  min    6.472  median    7.032  p95    8.228  p99   19.811  max   19.811  ms (50 runs)
-  connect  min    0.010  median    0.011  p95    0.016  p99    0.020  max    0.020  ms
-  admit    min    0.136  median    0.172  p95    0.226  p99    0.233  max    0.233  ms
-  launch   min    1.511  median    1.767  p95    2.085  p99    2.286  max    2.286  ms
-  command  min    3.554  median    3.927  p95    4.697  p99   16.406  max   16.406  ms
-  drain    min    0.001  median    0.014  p95    0.024  p99    0.028  max    0.028  ms
-  report   min    0.191  median    0.225  p95    0.285  p99    0.299  max    0.299  ms
-  other    min    0.848  median    0.966  p95    1.158  p99    1.439  max    1.439  ms
-{"runs":50,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"cbb9223","load_1m":7.72,"cpu_pressure_some_avg10":1.53,"memory_pressure_some_avg10":0.00,"io_pressure_some_avg10":3.23,"io_pressure_full_avg10":2.16,"held_runs":0,"held_reason":null,"busy":true,"rows":[...]}
+machine: load 3.25 pressure cpu 0.80% memory 0.00% io some 5.63% io full 4.52%  BUSY: the numbers read high, do not compare them
+bare       min    0.377  median    0.428  p95    0.508  p99    0.812  max    0.812  ms (50 runs)
+floor      min    0.974  median    1.158  p95    1.491  p99    3.227  max    3.227  ms (50 runs)
+taskslash  min    9.013  median   16.656  p95   20.582  p99   21.809  max   21.809  ms (50 runs)
+  connect  min    0.017  median    0.021  p95    0.072  p99    0.074  max    0.074  ms
+  admit    min    0.212  median    0.259  p95    0.372  p99    1.011  max    1.011  ms
+  launch   min    2.147  median    2.607  p95    3.600  p99    3.783  max    3.783  ms
+  command  min    4.609  median   11.621  p95   15.181  p99   15.695  max   15.695  ms
+  drain    min    0.001  median    0.024  p95    0.043  p99    1.380  max    1.380  ms
+  report   min    0.297  median    0.388  p95    0.768  p99    1.335  max    1.335  ms
+  other    min    1.205  median    1.416  p95    1.726  p99    1.965  max    1.965  ms
+{"runs":50,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"d7e0ed8","load_1m":3.25,"cpu_pressure_some_avg10":0.80,"memory_pressure_some_avg10":0.00,"io_pressure_some_avg10":5.63,"io_pressure_full_avg10":4.52,"held_runs":0,"held_reason":null,"busy":true,"rows":[...]}
 ```
 
 ## Reading it
