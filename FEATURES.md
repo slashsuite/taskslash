@@ -24,6 +24,7 @@ Checked against main at a4be4b5 on 2026-11-20.
 - `env-socket`: Choose the socket the daemon listens on and the commands talk to, in place of `$XDG_RUNTIME_DIR/taskslash/daemon.sock`. How to reach it: `TASKSLASH_SOCKET`. Source: `crates/taskslash-core/src/socket.rs`.
 - `env-db`: Choose the SQLite database the daemon records runs in, in place of `$XDG_STATE_HOME/taskslash/taskslash.db`, or `~/.local/state/taskslash/taskslash.db` when `XDG_STATE_HOME` is not set. How to reach it: `TASKSLASH_DB`. Source: `crates/taskslash-core/src/store.rs`.
 - `env-limits`: Change the share of CPU and memory and the disk write rate the daemon admits jobs against. How to reach it: `TASKSLASH_CPU_SHARE`, `TASKSLASH_MEM_SHARE`, `TASKSLASH_WRITE_MIB_S`. Source: `crates/taskslash-core/src/admission.rs`.
+- `env-phases`: Make `taskslash run` say on stderr, when the job ends, how many milliseconds each start phase took (connect, admit, launch, command, drain, report), for the start benchmark. How to reach it: `TASKSLASH_PHASES=1`. Source: `crates/taskslash-core/src/phases.rs`.
 - `no-web-app`: There is no web app and no HTTP API: every feature is reached through the `taskslash` command line and the daemon's socket. Source: `crates/taskslash/src/main.rs`.
 
 ## Plugins

@@ -8,6 +8,7 @@
 //! terminal is put back as it was when the command ends, and when it is stopped (Ctrl-Z, on the
 //! pipe path: on a pseudo-terminal the command's group is orphaned, so the kernel drops its stop).
 
+use crate::phases::{self, Phases};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -48,7 +49,8 @@ pub(crate) fn open_log(path: &Path) -> Option<File> {
 }
 
 /// Copies the command's outputs `sources` until each is at its end, or `done` is set and nothing
-/// arrived for `DRAIN` (a process the command left behind may hold an output open). Each chunk goes
+/// arrived for `DRAIN` (a process the command left behind may hold an output open). Every source
+/// at its end returns at once, `done` or not: there is nothing left to wait for. Each chunk goes
 /// into `log`, then to `deliver(index, chunk)`, which returns false when its destination is gone:
 /// that source is then closed, so a command writing to it gets SIGPIPE (or SIGHUP on a terminal) as
 /// it would have with no client in between.
@@ -61,10 +63,12 @@ pub(crate) fn pump(
     let mut open: Vec<Option<OwnedFd>> = sources.into_iter().map(Some).collect();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let finished = done.load(Ordering::Acquire);
-        if finished && open.iter().all(Option::is_none) {
+        // Without this, a command whose outputs end before its waiter sets `done` (the usual
+        // order) would poll no fds for a whole `DRAIN`, 100 ms on every run.
+        if open.iter().all(Option::is_none) {
             break;
         }
+        let finished = done.load(Ordering::Acquire);
         let mut fds: Vec<libc::pollfd> = Vec::new();
         let mut index = Vec::new();
         for (i, source) in open.iter().enumerate() {
@@ -460,11 +464,12 @@ impl Drop for Caller {
 
 /// Runs `command` to its end with its output copied to the caller and into `log`, forwarding
 /// signals to it and restoring the caller's terminal after; `stop` cancels it. Returns how it ended;
-/// an `Err` means it never started.
+/// an `Err` means it never started. `phases` gets `launch`, `command` and `drain`.
 pub(crate) fn run(
     mut command: Command,
     mut log: Option<File>,
     stop: &Arc<Stop>,
+    phases: Option<&Phases>,
 ) -> io::Result<ExitStatus> {
     let pty = is_tty(libc::STDOUT_FILENO);
     let stdin_tty = is_tty(libc::STDIN_FILENO);
@@ -520,6 +525,7 @@ pub(crate) fn run(
     let to_master = master.as_ref().map(OwnedFd::try_clone).transpose()?;
     let forwarder = Forwarder::start(master.as_ref().map(OwnedFd::try_clone).transpose()?);
     let mut child = command.spawn()?;
+    phases::mark(phases, "launch");
     // The command's copies of the terminal's other end are closed with it, so reading the master
     // ends when the command and what it started are gone.
     drop(command);
@@ -553,14 +559,19 @@ pub(crate) fn run(
         let done = &done;
         let log = log.as_mut();
         let sinks = &sinks;
-        scope.spawn(move || {
+        let pumping = scope.spawn(move || {
             pump(sources, log, done, |i, chunk| {
                 write_fd(sinks[i], chunk).is_ok()
             });
         });
         let status = wait(pid, &caller);
+        phases::mark(phases, "command");
         stop.ended();
         done.store(true, Ordering::Release);
+        if let Err(panic) = pumping.join() {
+            std::panic::resume_unwind(panic);
+        }
+        phases::mark(phases, "drain");
         status
     });
     drop(caller);
@@ -658,10 +669,13 @@ fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
 
 #[cfg(test)]
 mod tests {
-    use super::Stop;
+    use super::{Stop, pump};
     use std::io::{BufRead, BufReader};
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -670,6 +684,43 @@ mod tests {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
             stat.rsplit(") ").next().is_some_and(|s| s.starts_with('Z'))
         })
+    }
+
+    /// A pipe with `bytes` written into it and its write end closed: its read end.
+    fn ended_pipe(bytes: &[u8]) -> OwnedFd {
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two fds into `fds`.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both fds are open and ours alone.
+        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let mut write = std::fs::File::from(write);
+        std::io::Write::write_all(&mut write, bytes).unwrap();
+        read
+    }
+
+    #[test]
+    fn the_copy_ends_when_every_output_has_ended_before_the_command_is_reaped() {
+        // `done` is never set: the waiter has not seen the exit yet. Before, this polled no fds
+        // for 100 ms at a time until `done`, so it never returned here.
+        let (sent, got) = mpsc::channel();
+        thread::spawn(move || {
+            let done = AtomicBool::new(false);
+            let mut copied = vec![Vec::new(), Vec::new()];
+            pump(
+                vec![ended_pipe(b"out"), ended_pipe(b"err")],
+                None,
+                &done,
+                |i, chunk| {
+                    copied[i].extend_from_slice(chunk);
+                    true
+                },
+            );
+            let _ = sent.send(copied);
+        });
+        let copied = got
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the copy waited for done with every output at its end");
+        assert_eq!(copied, [b"out".to_vec(), b"err".to_vec()]);
     }
 
     #[test]

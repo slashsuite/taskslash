@@ -10,6 +10,7 @@ use crate::admission::{Reason, Waiting, waiting_line};
 use crate::capture::{self, Stop};
 use crate::estimate::Estimate;
 use crate::launch;
+use crate::phases::{self, Phases};
 use crate::protocol::{
     Class, ClientMessage, DaemonMessage, JobEnded, JobEvent, JobState, KeySummary, Kind, Launch,
     Run, Status, Was, receive, send, submitted_from,
@@ -110,10 +111,15 @@ pub fn run(
         cwd: &cwd,
         label: None,
     };
-    run_job(socket, &job, |command, log, stop| {
-        capture::run(command, log, stop).map(|status| (status, Report::default()))
+    let phases = Phases::from_env();
+    let ran = run_job(socket, &job, phases.as_ref(), |command, log, stop| {
+        capture::run(command, log, stop, phases.as_ref()).map(|status| (status, Report::default()))
     })
-    .map(|(code, _)| code)
+    .map(|(code, _)| code);
+    if let Some(phases) = &phases {
+        eprintln!("{}", phases.line());
+    }
+    ran
 }
 
 /// One job to submit: `run`'s arguments, and the directory it runs in.
@@ -141,12 +147,15 @@ pub(crate) struct Report {
 /// connection, and a `cancel` from the daemon stops the command through the `Stop` handed to
 /// `exec`. Several may run at once, one per thread. Returns the exit code and `exec`'s report; an
 /// `Err` means the command never ran (it was cancelled while waiting, or the daemon is gone).
+/// `phases` gets the marks the client can see (`phases` module); `exec` makes its own.
 pub(crate) fn run_job(
     socket: &Path,
     job: &Job,
+    phases: Option<&Phases>,
     exec: impl FnOnce(Command, Option<File>, &Arc<Stop>) -> io::Result<(ExitStatus, Report)>,
 ) -> Result<(i32, Report), Error> {
     let mut daemon = Connection::open(socket)?;
+    phases::mark(phases, "connect");
     let submit = ClientMessage::Submit {
         name: job.name.clone(),
         kind: job.kind,
@@ -204,6 +213,7 @@ pub(crate) fn run_job(
         }
         reply = daemon.next()?;
     };
+    phases::mark(phases, "admit");
 
     // From here the daemon speaks only to cancel the job, and to answer `exited`.
     let stop = Arc::new(Stop::default());
@@ -250,6 +260,7 @@ pub(crate) fn run_job(
             .unwrap_or_else(|_| Err("its reader panicked".to_owned())),
         Err(e) => Err(e.to_string()),
     };
+    phases::mark(phases, "report");
     match reply {
         Ok(DaemonMessage::Recorded { .. }) => {}
         Ok(_) => eprintln!("taskslash: warning: the daemon did not record job {id}"),

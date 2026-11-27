@@ -204,6 +204,11 @@ The database is SQLite, at `$TASKSLASH_DB`, else `$XDG_STATE_HOME/taskslash/task
 The daemon listens on `$TASKSLASH_SOCKET`, or `$XDG_RUNTIME_DIR/taskslash/daemon.sock` when that is
 unset. The socket's directory is created with mode 0700: only you can submit jobs.
 
+With `TASKSLASH_PHASES=1`, `taskslash run` writes one more line on stderr when the job ends, how
+many milliseconds each phase of the start took:
+`taskslash: phases connect=0.014 admit=0.234 launch=1.856 command=12.059 drain=0.016 report=8.578 ms`.
+The start benchmark (`crates/taskslash-floor`) reads it.
+
 ### Kinds and estimates
 
 `--kind` is a job's cost class: `test`, `typecheck`, `build`, `browser` or `command` (the default).
