@@ -227,10 +227,10 @@ fn json_string(s: &str) -> String {
     out
 }
 
-/// `{"min_ms":...,"max_ms":...}` for `s`.
-fn stats_json(s: &Stats) -> String {
+/// `"min_ms":...,"max_ms":...` for `s`, the fields without their braces.
+fn stats_fields(s: &Stats) -> String {
     format!(
-        "{{\"min_ms\":{:.3},\"median_ms\":{:.3},\"p95_ms\":{:.3},\"p99_ms\":{:.3},\"max_ms\":{:.3}}}",
+        "\"min_ms\":{:.3},\"median_ms\":{:.3},\"p95_ms\":{:.3},\"p99_ms\":{:.3},\"max_ms\":{:.3}",
         s.min, s.median, s.p95, s.p99, s.max
     )
 }
@@ -356,18 +356,17 @@ fn run(options: &Options) -> Result<(), String> {
                         "  {name:<8} min {:>8.3}  median {:>8.3}  p95 {:>8.3}  p99 {:>8.3}  max {:>8.3}  ms",
                         p.min, p.median, p.p95, p.p99, p.max
                     );
-                    phases.push(format!("{}:{}", json_string(name), stats_json(p)));
+                    phases.push(format!("{}:{{{}}}", json_string(name), stats_fields(p)));
                 }
                 let phases = if phases.is_empty() {
                     String::new()
                 } else {
                     format!(",\"phases\":{{{}}}", phases.join(","))
                 };
-                let stats = stats_json(s);
                 json_rows.push(format!(
                     "{{\"name\":{},{}{phases}}}",
                     json_string(row.name),
-                    &stats[1..stats.len() - 1]
+                    stats_fields(s)
                 ));
             }
             Outcome::Skipped(why) => {

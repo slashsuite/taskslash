@@ -9,7 +9,7 @@
 //! `admit` is from `submit` to the daemon's `start`, `launch` from `start` to the command
 //! spawned (the log opened, the executable checked), `command` from the spawn to the command's
 //! exit (with `systemd-run` setting up its scope on that path), `drain` from the exit to the
-//! last of its output copied, and `report` from `exited` sent to `recorded` read. A phase the run
+//! last of its output copied, and `report` from there to `recorded` read (`exited` sent, the run's row written). A phase the run
 //! never reached is left out.
 
 use std::cell::RefCell;

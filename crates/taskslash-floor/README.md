@@ -27,26 +27,27 @@ socket, database and log directory and point the benchmark at it:
 
 ```bash
 cargo build --release --locked --bins
-export TASKSLASH_SOCKET=$TMPDIR/bench/d.sock TASKSLASH_DB=$TMPDIR/bench/d.db TASKSLASH_LOGS=$TMPDIR/bench/logs
+B=$(mktemp -d)
+export TASKSLASH_SOCKET=$B/d.sock TASKSLASH_DB=$B/d.db TASKSLASH_LOGS=$B/logs
 target/release/taskslash daemon &   # stop it with kill %1 when done
 target/release/floor-bench --taskslash target/release/taskslash
 ```
 
-Example output (100 runs each, the copy-loop fix, on a busy desktop):
+Example output (100 runs each, on an idle desktop):
 
 ```
-machine: load 9.09 cpu pressure 27.24%  BUSY: the numbers read high, do not compare them
-bare       min    0.355  median    0.414  p95    0.499  p99    0.568  max    0.676  ms (100 runs)
-floor      min    0.890  median    0.980  p95    1.122  p99    1.142  max    1.157  ms (100 runs)
-taskslash  min   15.568  median   25.977  p95   36.941  p99   38.200  max   42.879  ms (100 runs)
-  connect  min    0.010  median    0.014  p95    0.016  p99    0.020  max    0.023  ms
-  admit    min    0.223  median    0.277  p95    0.329  p99    0.347  max    0.430  ms
-  launch   min    1.581  median    1.843  p95    2.150  p99    2.225  max    2.283  ms
-  command  min    3.858  median   12.582  p95   18.736  p99   19.776  max   20.718  ms
-  drain    min    0.001  median    0.016  p95    0.032  p99    0.040  max    0.044  ms
-  report   min    8.076  median    8.810  p95   17.475  p99   21.159  max   22.978  ms
-  other    min    0.977  median    1.131  p95    1.250  p99    1.439  max    1.696  ms
-{"runs":100,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"c238b06","load_1m":9.09,"cpu_pressure_some_avg10":27.24,"busy":true,"rows":[...]}
+machine: load 1.92 cpu pressure 0.09%
+bare       min    0.358  median    0.449  p95    0.532  p99    0.685  max    1.008  ms (100 runs)
+floor      min    0.891  median    1.013  p95    1.262  p99    1.281  max    1.345  ms (100 runs)
+taskslash  min   14.150  median   26.519  p95   34.964  p99   37.893  max   38.668  ms (100 runs)
+  connect  min    0.009  median    0.012  p95    0.016  p99    0.018  max    0.019  ms
+  admit    min    0.273  median    0.345  p95    0.431  p99    0.541  max    0.544  ms
+  launch   min    1.660  median    1.860  p95    2.258  p99    2.394  max    2.733  ms
+  command  min    3.854  median   12.541  p95   20.363  p99   22.489  max   22.903  ms
+  drain    min    0.001  median    0.016  p95    0.030  p99    0.041  max    0.067  ms
+  report   min    7.156  median   10.505  p95   14.524  p99   17.007  max   17.429  ms
+  other    min    0.959  median    1.138  p95    1.266  p99    1.287  max    1.310  ms
+{"runs":100,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"7b8fe80","load_1m":1.92,"cpu_pressure_some_avg10":0.09,"busy":false,"rows":[...]}
 ```
 
 ## Reading it
@@ -71,7 +72,7 @@ like the rows are:
 - `command`: from the spawn to the command's exit. On a machine with a user session this includes
   `systemd-run` setting up the job's scope, most of the start.
 - `drain`: from the exit to the last of the command's output copied.
-- `report`: from `exited` sent to the daemon's `recorded`, the run's row written.
+- `report`: from there to the daemon's `recorded`: `exited` sent and the run's row written.
 - `other`: the rest of the start to exit time, the client process starting and exiting.
 
 The machine line and the JSON carry the 1-minute load average and CPU pressure (`some avg10`) read

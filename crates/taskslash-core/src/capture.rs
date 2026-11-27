@@ -568,7 +568,9 @@ pub(crate) fn run(
         phases::mark(phases, "command");
         stop.ended();
         done.store(true, Ordering::Release);
-        let _ = pumping.join();
+        if let Err(panic) = pumping.join() {
+            std::panic::resume_unwind(panic);
+        }
         phases::mark(phases, "drain");
         status
     });
