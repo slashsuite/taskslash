@@ -221,7 +221,7 @@ fn run_node(
         label: Some(&node.target),
     };
     let mut wall = Duration::ZERO;
-    let result = run_job(socket, &job, |mut command, log, stop| {
+    let result = run_job(socket, &job, None, |mut command, log, stop| {
         if let Some(path) = gate_path(root, env::var_os("PATH")) {
             command.env("PATH", path);
         }
