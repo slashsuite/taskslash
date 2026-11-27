@@ -1,6 +1,6 @@
 //! `taskslash history` through a real `taskslash daemon`, each test with its own socket and
 //! database. Each environment asserts the launch path it has: the scope path where there is a
-//! systemd user session (this desktop), the plain path where there is not (CI).
+//! systemd user session (this desktop, and CI, which starts one), the plain path where there is not.
 
 use serde_json::Value;
 use std::fs;
@@ -12,6 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
+#[path = "common/session.rs"]
+mod session;
 
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 const MIB: f64 = (1u64 << 20) as f64;
@@ -116,17 +118,6 @@ impl Drop for Daemon {
     }
 }
 
-/// Whether this machine can start a transient systemd user scope, asked the way the daemon asks.
-fn has_user_session() -> bool {
-    Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--", "true"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 fn number(run: &Value, field: &str) -> f64 {
     run[field]
         .as_f64()
@@ -166,7 +157,7 @@ fn history_estimates_from_the_newest_kind_and_says_where_each_figure_came_from()
     let estimate = &history["estimate"];
     eprintln!("t4: {estimate}");
     assert_eq!(history["runs"][0]["kind"], "build", "{history}");
-    if has_user_session() {
+    if session::scope_expected() {
         assert_eq!(estimate["samples"]["measured"], 1, "{estimate}");
         // One measured run: memory and I/O from it; CPU and duration only when it was calm.
         assert_eq!(estimate["source"]["mem"], "history", "{estimate}");
@@ -187,7 +178,7 @@ fn history_estimates_from_the_newest_kind_and_says_where_each_figure_came_from()
 
 #[test]
 fn a_run_costs_what_it_used_on_the_path_this_machine_has() {
-    let scoped = has_user_session();
+    let scoped = session::scope_expected();
     eprintln!("launch path: {}", if scoped { "scope" } else { "plain" });
     let daemon = Scratch::new().daemon();
     let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/probe.py");
@@ -210,9 +201,9 @@ fn a_run_costs_what_it_used_on_the_path_this_machine_has() {
     let run = &runs[0];
     eprintln!("t2: {run}");
     assert_eq!(run["exit_code"], 0, "{run}");
+    assert_eq!(run["launch"], session::expected_launch(None), "{run}");
 
     if !scoped {
-        assert_eq!(run["launch"], "plain", "{run}");
         assert!(
             daemon
                 .log()
@@ -225,7 +216,6 @@ fn a_run_costs_what_it_used_on_the_path_this_machine_has() {
         }
         return;
     }
-    assert_eq!(run["launch"], "scope", "{run}");
     assert_between("CPU seconds", number(run, "cpu_usec") / 1e6, 3.4, 4.6);
     assert_between(
         "peak memory MiB",

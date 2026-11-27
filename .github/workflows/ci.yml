@@ -54,6 +54,20 @@ jobs:
         env: *moon-remote-token
       - run: bun run format:check
         env: *moon-remote-token
+      # The runner has no systemd user session, so without one the daemon would launch every job
+      # plain and the scope path (the one a desktop takes) would never run. Lingering starts the
+      # runner user's manager; TASKSLASH_REQUIRE_SCOPE makes the tests fail if it is not reachable.
+      - name: Start a systemd user session
+        run: |
+          sudo loginctl enable-linger "$USER"
+          bus="/run/user/$(id -u)/bus"
+          for _ in $(seq 100); do [ -S "$bus" ] && break; sleep 0.1; done
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$bus"
+            echo "TASKSLASH_REQUIRE_SCOPE=1"
+          } >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --scope --quiet -- true
       - run: bun run test
         env: *moon-remote-token
       - run: bun run build

@@ -1,7 +1,7 @@
 //! Output capture in `taskslash run` and `taskslash logs`, through a real daemon, each test with
 //! its own socket, database and log directory. The terminal and signal tests run on both launch
-//! paths: the one this machine has (the scope path where there is a systemd user session) and the
-//! plain path (`TASKSLASH_LAUNCH=plain`).
+//! paths: the one this machine has (the scope path where there is a systemd user session, which CI
+//! starts) and the plain path (`TASKSLASH_LAUNCH=plain`). Each asserts the path its run recorded.
 
 use serde_json::Value;
 use std::fs;
@@ -17,6 +17,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
+#[path = "common/session.rs"]
+mod session;
 
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 
@@ -143,7 +145,8 @@ fn stdout_and_stderr_reach_the_callers_streams_and_the_log() {
         (text(&out.stdout), text(&out.stderr)),
         ("out\n".into(), "err\n".into())
     );
-    let (_, _, log) = scratch.last("sh -c");
+    let (_, ran, log) = scratch.last("sh -c");
+    assert_eq!(ran, session::expected_launch(None));
     let mut lines: Vec<String> = text(&log).lines().map(str::to_owned).collect();
     lines.sort();
     assert_eq!(lines, ["err", "out"]);
@@ -254,7 +257,7 @@ fn under_a_terminal_the_command_sees_one_and_the_terminal_is_put_back() {
         assert!(seen.contains("stdout-is-a-tty"), "{launch:?}: {seen:?}");
         assert!(seen.contains("\u{1b}[31mred"), "{launch:?}: {seen:?}");
         let (_, ran, log) = scratch.last("sh -c");
-        assert!(launch.is_none() || ran == "plain", "{ran}");
+        assert_eq!(ran, session::expected_launch(launch), "{launch:?}");
         let log = text(&log);
         assert!(log.contains("stdout-is-a-tty"), "{ran}: {log:?}");
         assert!(log.contains("\u{1b}[31mred"), "{ran}: {log:?}");
@@ -323,7 +326,8 @@ fn sigint_to_the_client_reaches_the_command_on_pipes_and_on_a_terminal() {
             if let Some(reading) = reading {
                 reading.join().unwrap();
             }
-            let (_, _, log) = scratch.last("sh -c");
+            let (_, ran, log) = scratch.last("sh -c");
+            assert_eq!(ran, session::expected_launch(launch), "{case}");
             assert!(text(&log).contains("started"), "{case}: {log:?}");
         }
     }
