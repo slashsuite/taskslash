@@ -199,7 +199,9 @@ measured, never capped. `TASKSLASH_LAUNCH=plain` makes the daemon use plain chil
 user session exists (the tests use it to run both paths on one machine).
 
 The database is SQLite, at `$TASKSLASH_DB`, else `$XDG_STATE_HOME/taskslash/taskslash.db`, else
-`~/.local/state/taskslash/taskslash.db`. Only the daemon writes it.
+`~/.local/state/taskslash/taskslash.db`. Only the daemon writes it. It is in WAL mode, so
+recent rows can sit in `taskslash.db-wal` beside it: back it up with
+`sqlite3 taskslash.db ".backup copy.db"`, not by copying the file.
 
 The daemon listens on `$TASKSLASH_SOCKET`, or `$XDG_RUNTIME_DIR/taskslash/daemon.sock` when that is
 unset. The socket's directory is created with mode 0700: only you can submit jobs.

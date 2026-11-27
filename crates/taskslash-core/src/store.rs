@@ -108,6 +108,14 @@ impl Store {
     }
 
     fn with(conn: Connection) -> Result<Self, Error> {
+        // Every run's row is written while its client waits for `recorded`. In the default
+        // rollback journal each write is several fsyncs (8 to 11 ms on btrfs); in WAL with
+        // `synchronous = NORMAL` only a checkpoint (about every 1000 pages) fsyncs. A power cut
+        // can lose the rows written since the last checkpoint, never the database.
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+            .map_err(sql)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(sql)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY,
