@@ -33,21 +33,21 @@ target/release/taskslash daemon &   # stop it with kill %1 when done
 target/release/floor-bench --taskslash target/release/taskslash
 ```
 
-Example output (100 runs each, on an idle desktop):
+Example output (50 runs each, on a desktop with other builds running, so the load marks it busy):
 
 ```
-machine: load 1.65 cpu pressure 0.00%
-bare       min    0.341  median    0.398  p95    0.476  p99    0.532  max    0.535  ms (100 runs)
-floor      min    0.854  median    0.943  p95    1.007  p99    1.041  max    1.097  ms (100 runs)
-taskslash  min    6.491  median    6.961  p95    7.928  p99    8.653  max   18.897  ms (100 runs)
-  connect  min    0.010  median    0.011  p95    0.015  p99    0.017  max    0.020  ms
-  admit    min    0.139  median    0.169  p95    0.208  p99    0.259  max    0.265  ms
-  launch   min    1.537  median    1.712  p95    2.037  p99    2.256  max    2.370  ms
-  command  min    3.538  median    3.888  p95    4.342  p99    4.421  max   15.387  ms
-  drain    min    0.001  median    0.015  p95    0.026  p99    0.028  max    0.044  ms
-  report   min    0.186  median    0.226  p95    0.304  p99    0.332  max    0.343  ms
-  other    min    0.837  median    0.964  p95    1.123  p99    1.201  max    1.314  ms
-{"runs":100,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"c473414","load_1m":1.65,"cpu_pressure_some_avg10":0.00,"busy":false,"rows":[...]}
+machine: load 7.72 pressure cpu 1.53% memory 0.00% io some 3.23% io full 2.16%  BUSY: the numbers read high, do not compare them
+bare       min    0.345  median    0.379  p95    0.473  p99    0.496  max    0.496  ms (50 runs)
+floor      min    0.863  median    0.948  p95    1.072  p99    1.099  max    1.099  ms (50 runs)
+taskslash  min    6.472  median    7.032  p95    8.228  p99   19.811  max   19.811  ms (50 runs)
+  connect  min    0.010  median    0.011  p95    0.016  p99    0.020  max    0.020  ms
+  admit    min    0.136  median    0.172  p95    0.226  p99    0.233  max    0.233  ms
+  launch   min    1.511  median    1.767  p95    2.085  p99    2.286  max    2.286  ms
+  command  min    3.554  median    3.927  p95    4.697  p99   16.406  max   16.406  ms
+  drain    min    0.001  median    0.014  p95    0.024  p99    0.028  max    0.028  ms
+  report   min    0.191  median    0.225  p95    0.285  p99    0.299  max    0.299  ms
+  other    min    0.848  median    0.966  p95    1.158  p99    1.439  max    1.439  ms
+{"runs":50,"floor_version":"0.1.0","taskslash_version":"taskslash 0.1.0","commit":"cbb9223","load_1m":7.72,"cpu_pressure_some_avg10":1.53,"memory_pressure_some_avg10":0.00,"io_pressure_some_avg10":3.23,"io_pressure_full_avg10":2.16,"held_runs":0,"held_reason":null,"busy":true,"rows":[...]}
 ```
 
 ## Reading it
@@ -79,10 +79,26 @@ like the rows are:
   checkpoint's (under 0.5 ms; in SQLite's default journal it was 8 to 11 ms on btrfs).
 - `other`: the rest of the start to exit time, the client process starting and exiting.
 
-The machine line and the JSON carry the 1-minute load average and CPU pressure (`some avg10`) read
-before the first start. Past a load of 2 or a CPU pressure of 5% the run is marked busy
-(`BUSY` on the machine line, `"busy":true` in the JSON): its numbers read high, so do not compare it
-with a run on an idle machine.
+The machine line and the JSON carry the 1-minute load average and the pressure `avg10` figures (CPU
+`some`, memory `some`, I/O `some` and `full`) read before the first start. Past a load of 2 or a
+CPU pressure of 5% the run is marked busy (`BUSY` on the machine line, `"busy":true` in the JSON):
+its numbers read high, so do not compare it with a run on an idle machine.
+
+A machine can have a low load and still hold every job: I/O stalled past the daemon's `full` gate
+(after a boot, or while something writes heavily) stops admission for all of them. A `taskslash`
+run whose job the daemon held is known by the `taskslash: job N waiting ...` line it writes, and the
+bench prints a `held:` line under the machine line with how many runs were held, the first one's
+admit time and the daemon's reason; the JSON has `held_runs` and `held_reason`. Any held run marks
+the run busy, since its admit is the gate's wait, not TaskSlash's. On a private daemon, with no
+managed job running, a held job starts once it has waited 3 minutes (the wait cap), so a held run
+shows an `admit` of about 180 s:
+
+```
+held: 1 of 1 runs waited in admit, the first 180.1 s: io full pressure 12% over the 5% gate
+```
+
+and the daemon's log has `job 1 waiting (1st): io full pressure 12% over the 5% gate` and then
+`job 1 started (normal) past its 3 min wait cap`.
 
 The last line is JSON with every row and phase, both versions, the repo commit and the machine's
 state. Record each run as a new row in the project's benchmark log, with its machine state; never
