@@ -381,6 +381,8 @@ impl Stop {
             .announce
             .take();
         if let Some(announce) = announce {
+            #[cfg(debug_assertions)]
+            pause_before_announce();
             announce(pid, group);
         }
     }
@@ -405,6 +407,20 @@ impl Stop {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .ended = true;
+    }
+}
+
+/// A test hook, in debug builds only: when `TASKSLASH_TEST_ANNOUNCE_PAUSE` names a path, the client
+/// writes that file once the command is forked and then waits `ANNOUNCE_PAUSE` before it tells the
+/// daemon the command's pid. A test that waits for the file and then kills the client lands the kill
+/// inside the window between fork and announce every time, so a spawn that skips the gate leaves
+/// its command running and fails the test.
+#[cfg(debug_assertions)]
+fn pause_before_announce() {
+    const ANNOUNCE_PAUSE: Duration = Duration::from_secs(1);
+    if let Some(path) = std::env::var_os("TASKSLASH_TEST_ANNOUNCE_PAUSE") {
+        let _ = std::fs::write(path, b"");
+        thread::sleep(ANNOUNCE_PAUSE);
     }
 }
 
@@ -472,13 +488,16 @@ impl Gate {
 }
 
 /// Held from a gated command's fork until its gate is closed. A child holds every fd the client
-/// had when it forked until it execs, so a command forked while another gate was open (`taskslash
-/// moon` forks its targets on threads of their own) would hold that gate's sockets: the other child
-/// would miss the client's death, and the other gate's thread could wait on this child's exec.
+/// had when it forked until it execs, so a gated command forked while another gate was open
+/// (`taskslash moon` forks its targets on threads of their own) would hold that gate's sockets
+/// while it waits on its own: the other child would miss the client's death, and the other gate's
+/// thread could wait on this child's exec. Only gated forks take this lock. Another fork (the
+/// `systemd-run --version` that `launch::expands` runs) can still copy an open gate's sockets, but
+/// it waits on nothing before its exec, and the exec closes them (they are close-on-exec).
 static FORKING: Mutex<()> = Mutex::new(());
 
 /// Spawns `command` held behind a [`Gate`] until `stop` has announced its pid, one gated command
-/// at a time in this process, so each held child holds no gate but its own. `group`: the command
+/// at a time in this process, so no held child holds a gate but its own. `group`: the command
 /// leads a process group of its own (its pre-exec steps make it one), else it shares the client's.
 pub(crate) fn spawn_gated(
     command: &mut Command,

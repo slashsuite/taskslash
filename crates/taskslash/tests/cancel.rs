@@ -71,10 +71,16 @@ impl Daemon {
 
     /// Starts `taskslash run --name <name> -- sh -c <script>`.
     fn spawn(&self, name: &str, script: &str) -> Child {
+        self.spawn_with(name, script, &[])
+    }
+
+    /// `spawn`, with `env` set on the client.
+    fn spawn_with(&self, name: &str, script: &str, env: &[(&str, &Path)]) -> Child {
         Self::command(
             &self.dir,
             &["run", "--name", name, "--", "sh", "-c", script],
         )
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -302,7 +308,9 @@ fn gone(pid: &str) -> bool {
 
 /// A `taskslash run` killed before its command ends: the daemon stops the command (the shell and
 /// the `sleep` it started) and records the run with no exit code. On the scope path it also stops a
-/// `sleep` that left the command's process group, which only the scope still holds.
+/// `sleep` that left the command's process group, which only the scope still holds. The test hook
+/// holds the client for a second between forking the command and telling the daemon its pid, so a
+/// command let run before then writes its pids, and is killed, inside that window.
 fn a_run_whose_client_is_killed_has_its_command_stopped(launch: Option<&str>) {
     let daemon = Daemon::start_on(&format!("orphan-{}", launch.unwrap_or("default")), launch);
     let shell = daemon.dir.join("shell");
@@ -316,7 +324,12 @@ fn a_run_whose_client_is_killed_has_its_command_stopped(launch: Option<&str>) {
         sleep.display(),
         shell.display()
     );
-    let mut run = daemon.spawn("orphan", &script);
+    let forked = daemon.dir.join("forked");
+    let mut run = daemon.spawn_with(
+        "orphan",
+        &script,
+        &[("TASKSLASH_TEST_ANNOUNCE_PAUSE", &forked)],
+    );
     daemon.running("orphan");
     let deadline = Instant::now() + Duration::from_secs(5);
     let pids = loop {
