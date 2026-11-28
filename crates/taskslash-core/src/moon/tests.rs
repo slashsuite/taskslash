@@ -192,6 +192,27 @@ fn a_moon_target_resolves_to_its_key_only_inside_a_workspace() {
 }
 
 #[test]
+fn the_origin_names_the_repository_whatever_its_url_looks_like() {
+    for (url, name) in [
+        ("git@github.com:me/shop.git", Some("shop")),
+        ("https://github.com/me/shop", Some("shop")),
+        ("https://github.com/me/shop.git/", Some("shop")),
+        ("\"ssh://git@host:2222/me/shop.git\"", Some("shop")),
+        ("/srv/git/shop.git", Some("shop")),
+        ("host:shop", Some("shop")),
+        ("", None),
+    ] {
+        let config = format!("[remote \"origin\"]\n\tfetch = +refs/*\n\turl = {url}\n");
+        assert_eq!(origin_name(&config).as_deref(), name, "{url}");
+    }
+    assert_eq!(
+        origin_name("[remote \"upstream\"]\n\turl = x/shop.git\n"),
+        None,
+        "only origin counts"
+    );
+}
+
+#[test]
 fn a_cycle_is_an_error_not_a_hang() {
     let tasks = [
         task("p:a", &["p:b"]),
@@ -238,6 +259,7 @@ fn the_root_and_the_repository_name() {
     fs::write(wt.join(WORKSPACE_FILE), "projects: {}\n").unwrap();
     let gitdir = main.join(".git/worktrees/shop.feature-x");
     fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    fs::write(gitdir.join("commondir"), "../..\n").unwrap();
 
     assert_eq!(find_root(&wt.join("apps/cli")), Some(wt.as_path()));
     assert_eq!(find_root(&main), Some(main.as_path()));
@@ -254,6 +276,38 @@ fn the_root_and_the_repository_name() {
     fs::write(sub.join(".git"), "gitdir: ../shop/.git/modules/sub\n").unwrap();
     assert_eq!(repo_name(&sub), "sub");
     assert_eq!(repo_name(&base.join("none")), "none", "no .git at all");
+
+    // With an origin, its name wins over the folder's, for the clone and every worktree of it.
+    fs::write(
+        main.join(".git/config"),
+        "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = git@github.com:other/fork.git\n\
+         [remote \"origin\"]\n\turl = git@github.com:me/storefront.git\n",
+    )
+    .unwrap();
+    assert_eq!(repo_name(&main), "storefront");
+    assert_eq!(
+        repo_name(&wt),
+        "storefront",
+        "a worktree reads its main checkout's origin"
+    );
+
+    // A worktree of a bare repository reads the bare repository's config.
+    let bare = base.join("shop.git");
+    let bare_wt = base.join("bare-wt");
+    fs::create_dir_all(bare.join("worktrees/bare-wt")).unwrap();
+    fs::write(
+        bare.join("config"),
+        "[remote \"origin\"]\n\turl = git@github.com:me/storefront.git\n",
+    )
+    .unwrap();
+    fs::write(bare.join("worktrees/bare-wt/commondir"), "../..\n").unwrap();
+    fs::create_dir_all(&bare_wt).unwrap();
+    fs::write(
+        bare_wt.join(".git"),
+        format!("gitdir: {}\n", bare.join("worktrees/bare-wt").display()),
+    )
+    .unwrap();
+    assert_eq!(repo_name(&bare_wt), "storefront");
 
     // node_modules' moon first.
     let bin = main.join("node_modules/.bin");

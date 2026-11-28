@@ -45,11 +45,66 @@ fn moon_binary_on(root: &Path, path: Option<OsString>) -> Result<PathBuf, Error>
     })
 }
 
-/// The repository's name, the same for every worktree of it: the basename of `root` in a clone
-/// (`.git` a directory), or of the main checkout a worktree's `.git` file points to
-/// (`gitdir: <main>/.git/worktrees/<name>`). Anything else is the basename of `root`.
+/// The repository's name, the same for every worktree and clone of it: the last part of the
+/// `origin` remote's URL, less `.git` (`git@github.com:me/shop.git` is `shop`), read from the
+/// config in `root`'s git directory (a worktree's common one). With no `origin`,
+/// the basename of `root` in a clone (`.git` a directory), or of the main checkout a worktree's
+/// `.git` file points to (`gitdir: <main>/.git/worktrees/<name>`). Anything else is the basename
+/// of `root`.
 pub fn repo_name(root: &Path) -> String {
-    let main = fs::read_to_string(root.join(".git"))
+    if let Some(name) = git_dir(root)
+        .and_then(|dir| fs::read_to_string(dir.join("config")).ok())
+        .and_then(|config| origin_name(&config))
+    {
+        return name;
+    }
+    let main = main_checkout(root);
+    main.file_name().map_or_else(
+        || main.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The last part of the `url` of `[remote "origin"]` in a git config, less `.git`; `None` when
+/// there is none or it ends in nothing.
+fn origin_name(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_origin = line.replace(char::is_whitespace, "") == "[remote\"origin\"]";
+        } else if in_origin
+            && let Some((name, value)) = line.split_once('=')
+            && name.trim() == "url"
+        {
+            let url = value.trim().trim_matches('"').trim_end_matches('/');
+            let last = url.rsplit(['/', ':']).next()?;
+            let last = last.strip_suffix(".git").unwrap_or(last);
+            return (!last.is_empty()).then(|| last.to_owned());
+        }
+    }
+    None
+}
+
+/// The git directory whose `config` `root` uses: `root/.git` in a clone, else what the `gitdir:` of
+/// its `.git` file names, through that directory's `commondir` when it has one (a worktree, of a
+/// bare repository too).
+fn git_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let text = fs::read_to_string(&dot_git).ok()?;
+    let gitdir = root.join(text.strip_prefix("gitdir:")?.trim());
+    Some(match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(common) => gitdir.join(common.trim()),
+        Err(_) => gitdir,
+    })
+}
+
+/// The checkout whose `.git` directory `root` uses: `root` itself, or the main checkout of the
+/// worktree `root` is.
+fn main_checkout(root: &Path) -> PathBuf {
+    fs::read_to_string(root.join(".git"))
         .ok()
         .and_then(|text| {
             let gitdir = root.join(text.strip_prefix("gitdir:")?.trim());
@@ -58,11 +113,7 @@ pub fn repo_name(root: &Path) -> String {
             (worktrees.file_name()? == "worktrees" && dot_git.file_name()? == ".git")
                 .then(|| dot_git.parent().map(Path::to_path_buf))?
         })
-        .unwrap_or_else(|| root.to_path_buf());
-    main.file_name().map_or_else(
-        || main.to_string_lossy().into_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    )
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The key `taskslash moon` records `key` under when `key` looks like a moon target

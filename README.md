@@ -150,8 +150,10 @@ it. A target whose dependency failed, directly or not, is skipped; the others ke
 job's output is passed through as moon prints it.
 
 Each job is named `<repo>/<target>`, where `<repo>` is the repository's name, the same for every
-worktree of it (`shop` for both `shop` and its worktree `shop.feature-x`), so they share one
-history. Its kind is the task's name when that is `test`, `typecheck` or `build`, else `command`.
+worktree and clone of it, so they share one history: the last part of the `origin` remote's URL,
+less `.git` (`shop` for `git@github.com:me/shop.git`, whatever folder it is cloned into). With no
+`origin`, it is the folder name of the main checkout (`shop` for both `shop` and its worktree
+`shop.feature-x`). Its kind is the task's name when that is `test`, `typecheck` or `build`, else `command`.
 It ends with one line per target, in dependency order, each ending with the key its run is
 recorded under, and a failed target followed by the command that prints its log:
 
@@ -178,7 +180,14 @@ MiB written, the exit code, and the machine's pressure while it ran (`machine_cp
 `machine_mem_some`, `machine_io_some`: the mean of the `some avg10` readings taken during the run,
 null when none was). A `taskslash moon` job also records `cached` (moon replayed it from cache) and
 `moon_hash`; both are null for any other run. The key is `--name` when given, else the first two words of the command
-(`bunx moon`). `taskslash history <key>` prints the newest 20 runs of a key (`--limit` for another
+(`bunx moon`), or of the script of `sh -c '<script>'` (also `bash`, `dash`, `zsh`, `ksh`, and
+flags such as `-lc`): `sh -c 'cargo test --locked'` is `cargo test`. In both, a word that is a
+path (starting with `/`, `./`, `../` or `~/`) is cut to its last part (`/usr/bin/cargo test` is
+`cargo test`), and a key over 60 characters keeps its first and last 24 or so around five hex digits of a hash of
+the whole key (`...53a45...`), so two long names that differ only in the middle stay apart. Give a
+`--name` to anything you run more than once, so its runs share a key you can type. A key typed to
+`history` or `logs` is shaped the same way, so the whole long name still finds its runs (a key
+recorded before keys were shaped is still found as it was typed). `taskslash history <key>` prints the newest 20 runs of a key (`--limit` for another
 number, `--where <dir>` for only those submitted from a worktree, by its directory name or full
 path), `-` for a value that was not measured, and the worktree each ran in; a run whose
 `taskslash run` went away before the command ended has no exit code. With no key it lists every key
