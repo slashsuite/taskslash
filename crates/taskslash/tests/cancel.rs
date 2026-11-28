@@ -291,11 +291,12 @@ fn cancelling_a_job_the_daemon_does_not_hold_exits_1() {
     );
 }
 
-/// Whether `pid` has ended: no such process, or a zombie its parent has yet to reap.
+/// Whether `pid` has ended: no such process, a zombie its parent has yet to reap, or one being
+/// reaped (`X`, for the moment between the two).
 fn gone(pid: &str) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
         stat.rsplit_once(") ")
-            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+            .is_some_and(|(_, rest)| rest.starts_with(['Z', 'X', 'x']))
     })
 }
 
@@ -307,8 +308,10 @@ fn a_run_whose_client_is_killed_has_its_command_stopped(launch: Option<&str>) {
     let shell = daemon.dir.join("shell");
     let sleep = daemon.dir.join("sleep");
     let escaped = daemon.dir.join("escaped");
+    // The escaped sleep writes its own pid once it has left the group, so a stop that comes as soon
+    // as all three pids are known cannot catch it still in the group.
     let script = format!(
-        "setsid sleep 600 & echo $! > {}; sleep 600 & echo $! > {}; echo $$ > {}; wait",
+        "setsid sh -c 'echo $$ > {}; exec sleep 600' & sleep 600 & echo $! > {}; echo $$ > {}; wait",
         escaped.display(),
         sleep.display(),
         shell.display()
