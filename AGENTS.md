@@ -37,6 +37,12 @@ For the crates, `lint` is `cargo clippy --all-targets -- -D warnings`, `test` is
 (`cargo fmt --check`, and `cargo fmt` fixes it). On a new machine run `rustup toolchain install`
 first: it installs the toolchain `rust-toolchain.toml` pins (the `gate` job does the same).
 
+The `taskslash` tests run every job on the launch path the machine has: a systemd scope where there
+is a user session, else a plain child, and they assert which one each run took. The `gate` job
+starts a user session (`loginctl enable-linger`) and sets `TASKSLASH_REQUIRE_SCOPE=1`, so a missing
+session fails the tests there instead of quietly testing only the plain path. Without a session
+they say so on stderr.
+
 One project: `bunx moon run scripts:typecheck`. moon caches in `.moon/cache` (gitignored); add `--force` to
 rerun a cached task. A shared moon remote cache sits behind a bearer token read from
 `MOON_REMOTE_TOKEN`; unset, moon warns about a 401 and runs on the local cache, so CI passes with no
