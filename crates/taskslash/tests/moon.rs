@@ -305,3 +305,52 @@ fn a_bare_binary_in_the_workspaces_node_modules_bin_runs_without_a_path_prefix()
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(states(&summary(&out))["b:bare"], "pass", "{out:?}");
 }
+
+/// A repository with `scripts/moon.ts` runs moon through it, as its own scripts do (it finds a
+/// toolchain, sets what a task needs): `taskslash moon` asks it for the tasks and runs each target
+/// through it. The wrapper here records its arguments and sets `FIXTURE_WRAPPED`, which `b:wrapped`
+/// needs to pass; plain moon fails it.
+#[test]
+fn a_repos_moon_wrapper_runs_the_query_and_every_target() {
+    let daemon = Scratch::new().daemon();
+    let workspace = &daemon.scratch.workspace;
+    let plain = daemon.scratch.taskslash(&["moon", "b:wrapped"]);
+    assert_eq!(plain.status.code(), Some(1), "no wrapper yet: {plain:?}");
+
+    fs::create_dir_all(workspace.join("scripts")).unwrap();
+    fs::write(
+        workspace.join("scripts/moon.ts"),
+        r#"import { appendFileSync } from "node:fs";
+import { join } from "node:path";
+const root = join(import.meta.dir, "..");
+const args = process.argv.slice(2);
+appendFileSync(join(root, "wrapped.log"), args.join(" ") + "\n");
+const moon = Bun.spawnSync([process.execPath, join(root, "node_modules/.bin/moon"), ...args], {
+  env: { ...process.env, FIXTURE_WRAPPED: "yes" },
+  stdio: ["inherit", "inherit", "inherit"],
+});
+process.exit(moon.exitCode ?? 1);
+"#,
+    )
+    .unwrap();
+    let out = daemon
+        .scratch
+        .taskslash(&["moon", "b:wrapped", "b:test", "--force"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        states(&summary(&out)),
+        BTreeMap::from([("b:test", "pass"), ("b:wrapped", "pass")])
+    );
+    let log = fs::read_to_string(workspace.join("wrapped.log")).unwrap();
+    let mut calls: Vec<&str> = log.lines().collect();
+    calls.sort_unstable();
+    assert_eq!(
+        calls,
+        [
+            "query tasks",
+            "run b:test --upstream none --force",
+            "run b:wrapped --upstream none --force",
+        ],
+        "{log}"
+    );
+}

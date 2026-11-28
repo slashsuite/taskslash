@@ -12,3 +12,6 @@ tasks:
   # node_modules/.bin, which the test puts there.
   bare:
     command: "fixture-tool"
+  # Passes only when the repository's moon wrapper (scripts/moon.ts, which the test writes) ran it.
+  wrapped:
+    script: 'test "$FIXTURE_WRAPPED" = yes'

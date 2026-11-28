@@ -20,23 +20,48 @@ pub fn find_root(cwd: &Path) -> Option<&Path> {
         .find(|dir| dir.join(WORKSPACE_FILE).is_file())
 }
 
-/// `<root>/node_modules/.bin/moon` when it exists, else `moon` on `PATH`.
-pub fn moon_binary(root: &Path) -> Result<PathBuf, Error> {
-    moon_binary_on(root, env::var_os("PATH"))
+/// A wrapper a repository runs moon through, at its workspace root: `bun scripts/moon.ts <moon
+/// args>` sets up what its tasks need (a toolchain found and put first on `PATH`, an environment
+/// variable a task hashes) and then runs moon with the same arguments.
+const WRAPPER: &str = "scripts/moon.ts";
+
+/// The command that stands for `moon` in the workspace at `root`, its arguments to follow: `bun
+/// <root>/scripts/moon.ts` when the repository has that wrapper, else the moon `moon_binary_on` finds.
+/// An error when there is no moon (a wrapper runs one too), or a wrapper and no `bun` on `PATH`.
+pub fn moon_command(root: &Path) -> Result<Vec<OsString>, Error> {
+    moon_command_on(root, env::var_os("PATH"))
 }
 
-/// `moon_binary` with `path` as `PATH`.
+/// `moon_command` with `path` as `PATH`.
+fn moon_command_on(root: &Path, path: Option<OsString>) -> Result<Vec<OsString>, Error> {
+    let moon = moon_binary_on(root, path.clone())?;
+    let wrapper = root.join(WRAPPER);
+    if !wrapper.is_file() {
+        return Ok(vec![moon.into()]);
+    }
+    let bun = on_path(path, "bun").ok_or_else(|| {
+        Error::new(format!(
+            "{} runs moon here, and there is no bun on PATH to run it",
+            wrapper.display()
+        ))
+    })?;
+    Ok(vec![bun.into(), wrapper.into()])
+}
+
+/// The first `<dir>/<name>` that is a file, for each `dir` of `path` in order.
+fn on_path(path: Option<OsString>, name: &str) -> Option<PathBuf> {
+    env::split_paths(&path?)
+        .map(|dir| dir.join(name))
+        .find(|file| file.is_file())
+}
+
+/// `<root>/node_modules/.bin/moon` when it exists, else `moon` on `path`.
 fn moon_binary_on(root: &Path, path: Option<OsString>) -> Result<PathBuf, Error> {
     let local = root.join("node_modules/.bin/moon");
     if local.is_file() {
         return Ok(local);
     }
-    path.and_then(|path| {
-        env::split_paths(&path)
-            .map(|dir| dir.join("moon"))
-            .find(|moon| moon.is_file())
-    })
-    .ok_or_else(|| {
+    on_path(path, "moon").ok_or_else(|| {
         Error::new(format!(
             "no moon: neither {} nor moon on PATH; run your package manager's install \
                  (bun install) first",
