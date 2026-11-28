@@ -16,7 +16,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -413,7 +413,7 @@ impl Stop {
 /// message would leave a command the daemon cannot find (on the plain path nothing else holds it).
 /// So the forked child writes its pid to a socket and waits; a thread here announces the pid and
 /// then lets it go. A client that dies first closes its end, and the child exits without ever
-/// running the command.
+/// running the command. Spawn through [`spawn_gated`], which forks one gated command at a time.
 struct Gate {
     /// The parent's copy of the child's end, closed once the child is forked.
     theirs: UnixStream,
@@ -423,7 +423,8 @@ struct Gate {
 impl Gate {
     /// Adds the wait to `command`'s pre-exec steps, after the ones already there (so the child
     /// already leads its group when it is announced), and starts the thread that releases it.
-    fn hold(command: &mut Command, stop: &Arc<Stop>) -> io::Result<Self> {
+    /// `group`: the child leads a process group of its own (else it shares the client's).
+    fn hold(command: &mut Command, stop: &Arc<Stop>, group: bool) -> io::Result<Self> {
         let (mut ours, theirs) = UnixStream::pair()?;
         let fds = (ours.as_raw_fd(), theirs.as_raw_fd());
         // SAFETY: the closure runs in the forked child before exec and only makes
@@ -455,7 +456,7 @@ impl Gate {
             let mut pid = [0_u8; 4];
             // EOF: the fork failed, and nothing waits on the gate.
             if ours.read_exact(&mut pid).is_ok() {
-                stop.announce_now(libc::pid_t::from_ne_bytes(pid), true);
+                stop.announce_now(libc::pid_t::from_ne_bytes(pid), group);
                 let _ = ours.write_all(&[1]);
             }
         });
@@ -468,6 +469,29 @@ impl Gate {
         drop(self.theirs);
         let _ = self.waiter.join();
     }
+}
+
+/// Held from a gated command's fork until its gate is closed. A child holds every fd the client
+/// had when it forked until it execs, so a command forked while another gate was open (`taskslash
+/// moon` forks its targets on threads of their own) would hold that gate's sockets: the other child
+/// would miss the client's death, and the other gate's thread could wait on this child's exec.
+static FORKING: Mutex<()> = Mutex::new(());
+
+/// Spawns `command` held behind a [`Gate`] until `stop` has announced its pid, one gated command
+/// at a time in this process, so each held child holds no gate but its own. `group`: the command
+/// leads a process group of its own (its pre-exec steps make it one), else it shares the client's.
+pub(crate) fn spawn_gated(
+    command: &mut Command,
+    stop: &Arc<Stop>,
+    group: bool,
+) -> io::Result<Child> {
+    let forking = FORKING.lock().unwrap_or_else(PoisonError::into_inner);
+    let gate = Gate::hold(command, stop, group)?;
+    let spawned = command.spawn();
+    // Both of the gate's ends are closed here, so a fork after this inherits neither.
+    gate.close();
+    drop(forking);
+    spawned
 }
 
 fn window_size(fd: RawFd) -> Option<libc::winsize> {
@@ -613,10 +637,7 @@ pub(crate) fn run(
     let to_master = master.as_ref().map(OwnedFd::try_clone).transpose()?;
     let forwarder = Forwarder::start(master.as_ref().map(OwnedFd::try_clone).transpose()?);
     // After the forwarder, so the gate's thread inherits the held signals.
-    let gate = Gate::hold(&mut command, stop)?;
-    let spawned = command.spawn();
-    gate.close();
-    let mut child = spawned?;
+    let mut child = spawn_gated(&mut command, stop, true)?;
     phases::mark(phases, "launch");
     // The command's copies of the terminal's other end are closed with it, so reading the master
     // ends when the command and what it started are gone.
@@ -761,7 +782,7 @@ fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gate, Stop, pump};
+    use super::{Stop, pump, spawn_gated};
     use std::io::{BufRead, BufReader};
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
@@ -839,9 +860,7 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let gate = Gate::hold(&mut command, &stop).unwrap();
-        let spawned = command.spawn();
-        gate.close();
+        let spawned = spawn_gated(&mut command, &stop, true);
         assert!(spawned.unwrap().wait().unwrap().success());
         assert_eq!(
             *ran_first.lock().unwrap(),
@@ -850,6 +869,43 @@ mod tests {
         );
         assert!(marker.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gated_commands_forked_on_threads_of_their_own_are_forked_one_at_a_time() {
+        // A command forked while another's gate is open holds that gate's sockets until it execs,
+        // so the other could miss its client's death. Each announce here takes 200 ms; when the
+        // second fork waited for the first gate to close, the two never overlap.
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let spawn = |delay: Duration| {
+            let spans = Arc::clone(&spans);
+            thread::spawn(move || {
+                thread::sleep(delay);
+                let stop = Arc::new(Stop::default());
+                let held = Arc::clone(&spans);
+                stop.announce(move |_, group| {
+                    assert!(!group);
+                    let from = Instant::now();
+                    thread::sleep(Duration::from_millis(200));
+                    held.lock().unwrap().push((from, Instant::now()));
+                });
+                let mut command = Command::new("true");
+                command.stdin(Stdio::null());
+                let child = spawn_gated(&mut command, &stop, false);
+                assert!(child.unwrap().wait().unwrap().success());
+            })
+        };
+        let first = spawn(Duration::ZERO);
+        let second = spawn(Duration::from_millis(50));
+        first.join().unwrap();
+        second.join().unwrap();
+        let mut spans = spans.lock().unwrap().clone();
+        spans.sort();
+        assert_eq!(spans.len(), 2, "both commands were announced");
+        assert!(
+            spans[1].0 >= spans[0].1,
+            "the second command was forked while the first one's gate was open"
+        );
     }
 
     #[test]

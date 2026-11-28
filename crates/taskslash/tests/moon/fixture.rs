@@ -81,8 +81,17 @@ impl Scratch {
     }
 
     pub fn daemon(self) -> Daemon {
-        let child = self
-            .command(BIN, &["daemon"])
+        self.daemon_on(None)
+    }
+
+    /// The daemon on the launch path `TASKSLASH_LAUNCH` names (`None`: whichever the machine has).
+    pub fn daemon_on(self, launch: Option<&str>) -> Daemon {
+        let mut command = self.command(BIN, &["daemon"]);
+        match launch {
+            Some(launch) => command.env("TASKSLASH_LAUNCH", launch),
+            None => command.env_remove("TASKSLASH_LAUNCH"),
+        };
+        let child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -115,6 +124,12 @@ impl Drop for Scratch {
 pub struct Daemon {
     child: Child,
     pub scratch: Scratch,
+}
+
+impl Daemon {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
 }
 
 impl Drop for Daemon {

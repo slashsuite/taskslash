@@ -3,10 +3,13 @@
 //! `a:typecheck` and `a:test` depend on it; `b:test` passes, `b:typecheck` fails and `b:lint`
 //! depends on it. `b:test` writes `b-test-out` to stdout and `b-test-err` to stderr.
 
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod common;
 #[path = "moon/fixture.rs"]
@@ -353,4 +356,77 @@ process.exit(moon.exitCode ?? 1);
         ],
         "{log}"
     );
+}
+
+/// The processes (not zombies) but `except` whose working directory is `dir` or under it.
+fn processes_in(dir: &Path, except: u32) -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .is_ok_and(|pid| pid != except)
+        })
+        .filter(|entry| {
+            fs::read_link(entry.path().join("cwd")).is_ok_and(|cwd| cwd.starts_with(dir))
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// A `taskslash moon` killed as soon as the daemon has admitted its target, so mostly while it
+/// forks moon and before it has told the daemon moon's pid: no moon and nothing it started is left
+/// running, and the daemon frees the job. (The daemon runs in the workspace too.)
+fn a_moon_whose_client_is_killed_leaves_nothing_running(launch: Option<&str>) {
+    let daemon = Scratch::new().daemon_on(launch);
+    let scratch = &daemon.scratch;
+    let mut client = scratch
+        .command(BIN, &["moon", "b:hang"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let jobs = || {
+        let out = scratch.taskslash(&["status", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+        status["jobs"].as_array().cloned().unwrap_or_default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !jobs().iter().any(|job| job["key"] == "fixture/b:hang") {
+        assert!(Instant::now() < deadline, "b:hang was never admitted");
+        thread::sleep(Duration::from_millis(5));
+    }
+    client.kill().unwrap();
+    client.wait().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = processes_in(&scratch.workspace, daemon.pid());
+        if left.is_empty() && jobs().is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            for pid in &left {
+                let _ = Command::new("kill").args(["-9", pid]).status();
+            }
+            panic!("still running after its client was killed: {left:?}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_moon_whose_client_is_killed_leaves_nothing_running_on_the_machines_path() {
+    a_moon_whose_client_is_killed_leaves_nothing_running(None);
+}
+
+#[test]
+fn a_moon_whose_client_is_killed_leaves_nothing_running_on_the_plain_path() {
+    a_moon_whose_client_is_killed_leaves_nothing_running(Some("plain"));
 }
