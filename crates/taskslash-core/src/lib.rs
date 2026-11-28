@@ -15,6 +15,7 @@
 //! gave) fits under the budget beside what is committed. A waiting job is told why.
 
 pub mod admission;
+mod answers;
 mod capture;
 mod client;
 mod daemon;
@@ -35,14 +36,18 @@ mod socket;
 mod store;
 
 pub use client::{
-    Cancelled, Demand, Subscription, Whereabouts, cancel, events, history, keys, logs, run, status,
-    submitter, subscribe, why,
+    Cancelled, Demand, Subscription, Whereabouts, cancel, events, history, keys, logs, recent, run,
+    status, submitter, subscribe, why,
 };
 pub use daemon::serve;
 pub use moon::target_key;
 pub use moon_run::moon;
 pub use socket::socket_path;
 pub use store::{HISTORY_LIMIT, db_path};
+
+/// This build: the version and the commit it was built from, `0.1.0 (ccdb25a)`, or the version
+/// alone when it was built outside a git checkout.
+pub const VERSION: &str = env!("TASKSLASH_VERSION");
 
 use std::fmt;
 

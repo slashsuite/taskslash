@@ -38,8 +38,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use taskslash_core::Cancelled;
 use taskslash_core::admission::ordinal;
 use taskslash_core::estimate::{Estimate, Source};
-use taskslash_core::procfs::epoch_secs;
-use taskslash_core::protocol::{KeySummary, Run, Status, WaitingStatus, Was, worktree};
+use taskslash_core::procfs::{epoch_secs, local_time};
+use taskslash_core::protocol::{DaemonInfo, KeySummary, Run, Status, WaitingStatus, Was, worktree};
 
 /// How long, read at a glance: `45s`, `1m05s` past a minute, `2h03m` past an hour.
 pub fn duration(seconds: f64) -> String {
@@ -81,12 +81,42 @@ pub fn waiting_text(waiting: &[WaitingStatus]) -> String {
     out
 }
 
-/// A few lines: CPU, the three `some avg10` pressures, memory, each disk, each mount, each job
+/// The daemon's build, pid and how long it has run at `now` (since when, local time), and when its
+/// build is not this one's, that this one differs: after an install, the daemon still running the
+/// old build shows here.
+fn daemon_line(daemon: Option<&DaemonInfo>, now: SystemTime) -> String {
+    let Some(d) = daemon else {
+        return format!(
+            "daemon    older than this taskslash ({}), which names its build\n",
+            taskslash_core::VERSION
+        );
+    };
+    let mut line = format!(
+        "daemon    {}, pid {}, up {}",
+        d.version,
+        d.pid,
+        running_for(&d.started_at, now)
+    );
+    if let Some((date, time)) = local_time(&d.started_at) {
+        line.push_str(&format!(" (since {date} {time})"));
+    }
+    if d.version != taskslash_core::VERSION {
+        line.push_str(&format!(
+            "; this taskslash is {}, a different build",
+            taskslash_core::VERSION
+        ));
+    }
+    line.push('\n');
+    line
+}
+
+/// A few lines: the daemon, CPU, the three `some avg10` pressures, memory, each disk, each mount, each job
 /// (how long it has run at `now`, and its worktree), or that no job runs or waits.
 pub fn status_text(status: &Status, now: SystemTime) -> String {
     let m = &status.machine;
     let pct = |share: f64| format!("{:.0}%", share * 100.0);
-    let mut out = format!(
+    let mut out = daemon_line(status.daemon.as_ref(), now);
+    out.push_str(&format!(
         "cpu       {} busy on {} threads ({} online), load {:.2} {:.2} {:.2}\n",
         pct(m.cpu.busy),
         m.cpu.threads,
@@ -94,7 +124,7 @@ pub fn status_text(status: &Status, now: SystemTime) -> String {
         m.load[0],
         m.load[1],
         m.load[2]
-    );
+    ));
     out.push_str(&format!(
         "pressure  cpu {:.2}  memory {:.2}  io {:.2}  (some avg10, %)\n",
         m.cpu.pressure.some_avg10, m.memory.pressure.some_avg10, m.io.pressure.some_avg10
@@ -406,8 +436,44 @@ mod tests {
     }
 
     #[test]
+    fn status_names_the_daemons_build_and_how_long_it_has_run() {
+        let daemon = |version: &str| DaemonInfo {
+            version: version.into(),
+            started_at: "2026-11-16T22:55:00.000Z".into(),
+            pid: 4242,
+        };
+        let same = daemon_line(Some(&daemon(taskslash_core::VERSION)), midnight());
+        assert!(
+            same.starts_with(&format!(
+                "daemon    {}, pid 4242, up 1h05m (since ",
+                taskslash_core::VERSION
+            )),
+            "{same}"
+        );
+        assert!(!same.contains("different"), "{same}");
+        let old = daemon_line(Some(&daemon("0.0.9 (0000000)")), midnight());
+        assert!(
+            old.starts_with("daemon    0.0.9 (0000000), pid 4242, up 1h05m"),
+            "{old}"
+        );
+        assert!(
+            old.ends_with(&format!(
+                "; this taskslash is {}, a different build\n",
+                taskslash_core::VERSION
+            )),
+            "{old}"
+        );
+        let older = daemon_line(None, midnight());
+        assert!(
+            older.starts_with("daemon    older than this taskslash"),
+            "{older}"
+        );
+    }
+
+    #[test]
     fn status_says_when_nothing_runs_or_waits() {
         let status = Status {
+            daemon: None,
             machine: machine(),
             jobs: vec![],
             waiting: vec![],
@@ -431,6 +497,7 @@ mod tests {
             log_path: "/logs/3.log".into(),
         };
         let status = Status {
+            daemon: None,
             machine: machine(),
             jobs: vec![job],
             waiting: vec![waiting(

@@ -52,6 +52,7 @@ fn waiting(job: u64, key: &str, position: usize) -> WaitingStatus {
 
 fn status(jobs: Vec<JobStatus>, waiting: Vec<WaitingStatus>) -> Status {
     Status {
+        daemon: None,
         machine: machine(),
         jobs,
         waiting,
@@ -85,8 +86,40 @@ fn finished(job: u64, key: &str, log: Option<&str>) -> JobEvent {
     }
 }
 
+fn recorded(id: i64, key: &str, log: Option<&str>) -> Run {
+    Run {
+        id,
+        key: key.into(),
+        kind: Kind::Test,
+        argv: vec!["true".into()],
+        cwd: "/home/me/dev/repo".into(),
+        class: Class::Normal,
+        submitter: "/home/me/dev/repo".into(),
+        launch: taskslash_core::protocol::Launch::Plain,
+        started_at: "2026-11-16T00:00:00.000Z".into(),
+        wall_ms: 2000,
+        cpu_usec: None,
+        peak_cpu_5s: None,
+        peak_mem_bytes: None,
+        written_bytes: None,
+        exit_code: Some(1),
+        machine_cpu_some: None,
+        machine_mem_some: None,
+        machine_io_some: None,
+        cached: None,
+        moon_hash: None,
+        log_path: log.map(str::to_owned),
+    }
+}
+
 fn jobs(app: &App) -> Vec<u64> {
-    app.rows().iter().map(Row::job).collect()
+    app.rows()
+        .iter()
+        .filter_map(|r| match r.id() {
+            Id::Job(job) => Some(job),
+            Id::Run(_) => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -327,4 +360,118 @@ fn following_the_events_again_forgets_the_old_daemon_s_job_numbers() {
     assert!(matches!(app.rows()[0], Row::Running(j) if j.key == "new"));
     assert_eq!(app.pane(), Pane::Log("/logs/1.log"));
     assert_eq!(app.notice, None);
+}
+
+#[test]
+fn the_list_starts_with_the_newest_recorded_runs_after_the_jobs() {
+    let mut app = App::new();
+    app.status(status(vec![running(7, "gate")], vec![]));
+    app.seed(vec![
+        recorded(31, "web:test", Some("/logs/r31.log")),
+        recorded(30, "web:lint", None),
+    ]);
+    let ids: Vec<Id> = app.rows().iter().map(Row::id).collect();
+    assert_eq!(ids, [Id::Job(7), Id::Run(31), Id::Run(30)]);
+    let text = row_text(app.rows()[1]);
+    assert!(text.starts_with("  r31 exit 1 2s"), "{text}");
+    app.move_selection(1);
+    assert_eq!(app.pane(), Pane::Log("/logs/r31.log"));
+    assert!(screen(&app, 140, 12).contains("run 31 web:test: exit 1"));
+    app.move_selection(1);
+    assert_eq!(
+        app.pane(),
+        Pane::NoLog,
+        "a run before logs is not 'never started'"
+    );
+
+    // The job that wrote run 31 is not listed twice when its event comes after the seed.
+    app.event(JobEvent::Finished {
+        job: 7,
+        key: "web:test".into(),
+        exit_code: Some(0),
+        wall_ms: 10,
+        cached: None,
+        moon_hash: None,
+        run: Some(31),
+        log: Some("/logs/r31.log".into()),
+        at: "2026-11-17T00:00:01.000Z".into(),
+    });
+    let ids: Vec<Id> = app.rows().iter().map(Row::id).collect();
+    assert_eq!(ids, [Id::Job(7), Id::Run(30)]);
+}
+
+#[test]
+fn a_finished_job_with_a_run_is_kept_by_its_run_across_a_daemon_restart() {
+    let mut app = App::new();
+    app.event(JobEvent::Finished {
+        job: 1,
+        key: "old".into(),
+        exit_code: Some(0),
+        wall_ms: 10,
+        cached: None,
+        moon_hash: None,
+        run: Some(40),
+        log: Some("/logs/40.log".into()),
+        at: "2026-11-17T00:00:01.000Z".into(),
+    });
+    app.resubscribed();
+    app.status(status(vec![running(1, "new")], vec![]));
+    let ids: Vec<Id> = app.rows().iter().map(Row::id).collect();
+    assert_eq!(ids, [Id::Job(1), Id::Run(40)]);
+}
+
+#[test]
+fn c_cancels_a_running_or_waiting_job_only_when_pressed_twice() {
+    let mut app = App::new();
+    app.status(status(vec![running(1, "a")], vec![waiting(2, "b", 1)]));
+    assert_eq!(app.cancel_key(), None);
+    assert!(
+        app.notice
+            .as_deref()
+            .unwrap()
+            .contains("press c again to cancel job 1")
+    );
+    app.other_key();
+    assert_eq!(app.notice, None, "another key keeps the job");
+    assert_eq!(app.cancel_key(), None);
+    assert_eq!(app.cancel_key(), Some(1));
+
+    app.move_selection(1);
+    assert_eq!(app.cancel_key(), None);
+    app.move_selection(0);
+    assert_eq!(app.cancel_key(), Some(2), "a waiting job too");
+
+    app.seed(vec![recorded(9, "done", None)]);
+    app.move_selection(1);
+    assert_eq!(app.cancel_key(), None);
+    assert_eq!(app.cancel_key(), None);
+    assert!(
+        app.notice
+            .as_deref()
+            .unwrap()
+            .contains("only a running or waiting job")
+    );
+}
+
+#[test]
+fn question_mark_shows_every_key_and_the_footer_names_them() {
+    let mut app = App::new();
+    app.status(status(vec![], vec![]));
+    let text = screen(&app, 140, 16);
+    assert!(
+        text.contains("no jobs running, waiting or recorded"),
+        "{text}"
+    );
+    assert!(
+        text.contains("enter page the log   c cancel   ? keys"),
+        "{text}"
+    );
+    assert!(!text.contains("show or hide these keys"));
+    app.toggle_help();
+    let text = screen(&app, 140, 16);
+    for (key, what) in KEYS {
+        assert!(text.contains(&format!("{key:<16} {what}")), "{key}: {text}");
+    }
+    app.toggle_help();
+    assert!(!screen(&app, 140, 16).contains("show or hide these keys"));
 }

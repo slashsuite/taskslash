@@ -633,3 +633,82 @@ fn logs_lands_beside_the_database_unless_taskslash_logs_says_otherwise() {
     assert_eq!(fs::read_to_string(path).unwrap(), "moved\n");
     assert!(!scratch.logs().exists());
 }
+
+#[test]
+fn with_no_daemon_history_and_logs_read_the_database() {
+    let scratch = Scratch::new(None);
+    let no_db = scratch.run(&["logs", "--last", "offline"]);
+    assert_eq!(no_db.status.code(), Some(1), "{no_db:?}");
+    assert!(text(&no_db.stderr).contains("no daemon at"), "{no_db:?}");
+
+    let daemon = scratch.daemon(&[]);
+    let out = scratch.run(&[
+        "run",
+        "--name",
+        "offline",
+        "--",
+        "sh",
+        "-c",
+        "echo kept; exit 3",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    drop(daemon);
+
+    // Killed, the daemon left its WAL beside the database; then a clean close folds it in and
+    // removes it. Both read.
+    for state in ["as the daemon left it", "after a clean close"] {
+        if state == "after a clean close" {
+            let db = rusqlite::Connection::open(scratch.dir.join("runs.db")).unwrap();
+            db.query_row("SELECT count(*) FROM runs", [], |_| Ok(()))
+                .unwrap();
+            db.close().unwrap();
+            assert!(
+                !scratch.dir.join("runs.db-wal").exists(),
+                "the WAL is folded in"
+            );
+        } else {
+            assert!(
+                scratch.dir.join("runs.db-wal").exists(),
+                "a killed daemon leaves its WAL"
+            );
+        }
+        // Read-only: the database and its WAL are byte for byte what they were before.
+        let files = || ["runs.db", "runs.db-wal"].map(|name| fs::read(scratch.dir.join(name)).ok());
+        let before = files();
+        let history = scratch.run(&["history", "offline", "--json"]);
+        assert_eq!(history.status.code(), Some(0), "{state}: {history:?}");
+        let runs: Value = serde_json::from_slice(&history.stdout).unwrap();
+        assert_eq!(runs["runs"][0]["exit_code"], 3, "{state}");
+        let said = text(&history.stderr);
+        assert!(
+            said.contains("no daemon at") && said.contains("directly"),
+            "{said}"
+        );
+
+        let log = scratch.run(&["logs", "--last", "offline"]);
+        assert_eq!(log.status.code(), Some(0), "{state}: {log:?}");
+        assert_eq!(text(&log.stdout), "kept\n", "{state}");
+        let failed = scratch.run(&["logs", "--failed", "--all"]);
+        assert_eq!(text(&failed.stdout), "kept\n", "{state}: {failed:?}");
+
+        // A job's number is the daemon's, so it still needs one.
+        let job = scratch.run(&["logs", "1"]);
+        assert_eq!(job.status.code(), Some(1), "{state}: {job:?}");
+        assert!(
+            text(&job.stderr).contains("no daemon at"),
+            "{state}: {job:?}"
+        );
+        let after = files();
+        assert!(
+            after[0] == before[0],
+            "{state}: the offline reads wrote to the database"
+        );
+        // SQLite opens a WAL even to read, so a missing one comes back empty; never with a page.
+        let wal_kept = after[1] == before[1] || (before[1].is_none() && after[1] == Some(vec![]));
+        assert!(
+            wal_kept,
+            "{state}: the offline reads wrote to the WAL: {:?}",
+            after[1].as_ref().map(Vec::len)
+        );
+    }
+}

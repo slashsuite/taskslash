@@ -50,9 +50,13 @@ taskslash plugins                         # the plugins on PATH (below)
 
 `taskslash run` runs the command itself, in your directory, with your environment and terminal, and
 exits with its exit code (128+N when signal N killed it, 127 when it cannot be started). With no
-daemon running it does not run the command and exits 1; so do `taskslash history`,
-`taskslash status`, `taskslash why`, `taskslash cancel`, `taskslash logs`, `taskslash events` and
-`taskslash top`.
+daemon running it does not run the command and exits 1; so do `taskslash status`, `taskslash why`,
+`taskslash cancel`, `taskslash logs <job>`, `taskslash events` and `taskslash top`. With no daemon,
+`taskslash history` and `taskslash logs --run`, `--last` or `--failed` read the database
+read-only, after one line on stderr saying so, and exit 1 only when there is no database.
+
+`taskslash` with no command prints the help and exits 0; `taskslash --version` prints the version
+and the commit it was built from, `taskslash 0.1.0 (b82b25e)`.
 
 ### Every job's output is kept
 
@@ -359,7 +363,8 @@ tests can set the machine's load and pressure; do not use it otherwise.
 
 `taskslash status` answers from the daemon's latest machine reading, taken once a second (free
 space every 30 seconds), and lists the running jobs with their last live reading. The plain form is
-a few lines: CPU, the `some avg10` pressures, memory, each disk, each mount, then one line per
+a few lines: the daemon's build, pid and how long it has been up since when (and a
+note when this `taskslash` is a different build), then CPU, the `some avg10` pressures, memory, each disk, each mount, then one line per
 running job and one per waiting job, each with the worktree it was submitted from, or `no jobs
 running or waiting`:
 
@@ -399,26 +404,35 @@ mem 11.1 of 31.3 GiB used, 64% available, pressure 0.09   io some 1.04 full 0.53
 │  111 waiting 1st 4s     background  repo.wt-2  e2e       ││ ✓ renders the list (12 ms)       │
 │  112 exit 3 4s          normal      repo.wt-1  lint      ││                                  │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────┘
-q quit   up/down or j/k select
+q quit   j/k select   enter page the log   c cancel   ? keys
 ```
 
 - **The strip** on top: CPU busy and the threads jobs may use, CPU pressure, the load average;
   memory used of total and the share available, memory pressure, and IO pressure (`some` and
   `full`). All pressures are `some avg10` unless named, in percent. It refreshes once a second.
 - **The job list** on the left: the running jobs, then the waiting ones in queue order (place in
-  line and time waited), then the jobs that finished, newest first (exit code, wall time, `cached`
-  when moon replayed it, or `never started`). Each row has the job number, its state, class, the
+  line and time waited), then the finished runs, newest first (exit code, wall time, `cached`
+  when moon replayed it, or `never started`). Each row has the job number (`r<id>`, the run id,
+  for a run recorded before top opened or before the daemon restarted), its state, class, the
   submitting worktree's directory name and the key.
 - **The output pane** on the right: the selected job's log, as many of its last lines as fit,
   following new output as it is written. Colours, cursor moves and other control characters are
   removed, so a job cannot scramble the screen. A waiting job shows why it waits; a job that left
   the queue before it was admitted shows `never started`.
 
-Keys: up and down, or `j` and `k`, move the selection, which stays on the same job as the list
-changes. `q`, Esc or Ctrl-C quit and give the terminal back.
+Keys (`?` shows them on screen):
 
-The finished jobs are the ones that finished **since top opened**, at most 50: top follows the
-daemon's events and asks for no history when it starts. A line at the bottom says when it missed
+| Key | Does |
+| --- | --- |
+| up and down, `j` and `k` | move the selection, which stays on the same job as the list changes |
+| enter | open the selected log in `$PAGER` (`less` when unset); quitting the pager returns to top |
+| `c`, then `c` again | cancel the selected running or waiting job, as `taskslash cancel` does; any other key keeps it |
+| `?` | show or hide the keys |
+| `q`, Esc, Ctrl-C | quit and give the terminal back (Esc first closes the keys) |
+
+The finished list holds at most 50: when top opens it takes the runs that ended last from the
+daemon's records, and adds each job that finishes while it is open, the last to end first. A run recorded before logs were kept says
+so in the output pane. A line at the bottom says when it missed
 events because it read them too slowly, or when the daemon stops answering (top keeps trying).
 
 `top` exits 1 with the message `status` prints when no daemon answers, and 2 when stdout is not a
@@ -448,7 +462,8 @@ A command plugin replaces the `taskslash` process, so its exit code and signals 
 commands always win: a `taskslash-run` never runs. With no `taskslash-<name>` on `PATH`,
 `taskslash <name>` is a usage error (exit 2) that names the program it looked for. Only regular files
 (or links to one) with an execute bit count. When two directories on `PATH` hold the same name, the
-first one runs and `taskslash plugins` lists the later ones as shadowed.
+first one runs and `taskslash plugins` lists the later ones as shadowed. With none on `PATH`,
+`taskslash plugins` says `no plugins on PATH` and what a plugin is named (`--json` prints `[]`).
 
 A plugin needs no daemon to start, and gets this contract in its environment:
 
@@ -481,7 +496,8 @@ A listener follows what the daemon does with jobs and cannot change any of it. I
 `taskslash events`, which prints one line of JSON per job event on stdout as it happens, or it opens
 `TASKSLASH_SOCKET` and subscribes itself: send `{"type":"subscribe"}` on a connection of its own, and
 the daemon answers `{"type":"subscribed","protocol":1}`, then one event line per job event until the
-listener hangs up. `taskslash events` prints only the event lines, exits 0 when the daemon goes away
+listener hangs up. `taskslash events` prints only the event lines on stdout (on a terminal, one
+`listening for job events` line on stderr first, so an empty screen does not look hung), exits 0 when the daemon goes away
 and 1 when no daemon answers. The daemon starts no listener: run it yourself, or from a systemd unit
 of your own.
 
