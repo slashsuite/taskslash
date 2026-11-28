@@ -67,7 +67,6 @@ jobs:
             echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$bus"
             echo "TASKSLASH_REQUIRE_SCOPE=1"
           } >> "$GITHUB_ENV"
-          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --scope --quiet -- true
       - run: bun run test
         env: *moon-remote-token
       - run: bun run build

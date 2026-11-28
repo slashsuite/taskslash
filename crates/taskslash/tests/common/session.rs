@@ -2,6 +2,7 @@
 //! way the daemon probes, so a broken probe or broken scope arguments fail the tests instead of
 //! quietly turning every run plain.
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
@@ -26,7 +27,9 @@ pub fn scope_expected() -> bool {
                 std::env::var_os(REQUIRE).is_none(),
                 "{REQUIRE} is set but systemctl --user reaches no user manager"
             );
-            eprintln!(
+            // Straight to stderr: the test harness captures eprintln! and shows it only on a failure.
+            let _ = writeln!(
+                std::io::stderr(),
                 "no systemd user session: the scope path is not tested here, only the plain one"
             );
         }
