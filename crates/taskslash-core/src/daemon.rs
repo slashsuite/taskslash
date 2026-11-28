@@ -4,17 +4,17 @@
 
 use crate::Error;
 use crate::admission::Limits;
-use crate::estimate::estimate;
+use crate::answers::{self, recorded};
 use crate::launch;
 use crate::logs::{self, Retention};
 use crate::procfs;
 use crate::protocol::{
-    ClientMessage, DaemonMessage, JobEnded, JobState, Kind, Launch, LogFound, LogSelect, Run,
+    ClientMessage, DaemonInfo, DaemonMessage, JobEnded, JobState, Launch, LogFound, LogSelect,
     Status, Was, receive, send,
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
-use crate::store::{self, HISTORY_LIMIT, Store};
+use crate::store::Store;
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
@@ -53,6 +53,8 @@ struct Daemon {
     ended: Mutex<EndedJobs>,
     /// Each held job's connection, so `cancel` can reach its client. Locked after `scheduler`.
     links: Mutex<HashMap<u64, Arc<Mutex<job::Link>>>>,
+    /// When it started serving, for `status`.
+    started_at: SystemTime,
 }
 
 /// Binds the socket at `path`, opens the database at `db`, and serves until the process is killed.
@@ -89,6 +91,7 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         events: events::Bus::default(),
         ended: Mutex::new(EndedJobs::new(ENDED_JOBS)),
         links: Mutex::new(HashMap::new()),
+        started_at: SystemTime::now(),
     });
     let sampling = Arc::clone(&daemon);
     thread::spawn(move || sampling.sample_forever(machine));
@@ -111,20 +114,6 @@ pub fn serve(path: &Path, db: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
-}
-
-/// A recorded run as `log` answers it: the run, its log and whose it is.
-fn recorded(run: Option<Run>) -> Option<LogFound> {
-    run.map(|run| LogFound {
-        job: None,
-        run: Some(run.id),
-        log_path: run.log_path,
-        never_ran: false,
-        key: Some(run.key),
-        submitter: Some(run.submitter),
-        exit_code: run.exit_code,
-        started_at: Some(run.started_at),
-    })
 }
 
 /// The real sampler, or the fake one `TASKSLASH_FAKE_MACHINE` names (for tests).
@@ -204,22 +193,17 @@ impl Daemon {
             Ok(Some(ClientMessage::Submit { .. })) => {
                 refuse(&mut writer, "submit needs a non-empty argv");
             }
-            Ok(Some(ClientMessage::History { key, limit, within })) => {
-                let limit = limit.unwrap_or(HISTORY_LIMIT);
-                let reply = match self.history(&key, limit, within.as_deref()) {
-                    Ok(reply) => reply,
-                    Err(e) => DaemonMessage::Error {
+            Ok(Some(
+                message @ (ClientMessage::History { .. }
+                | ClientMessage::Keys
+                | ClientMessage::Recent { .. }),
+            )) => {
+                let reply = match answers::from_store(&self.store(), &message) {
+                    Some(Ok(reply)) => reply,
+                    Some(Err(e)) => DaemonMessage::Error {
                         message: e.to_string(),
                     },
-                };
-                let _ = send(&mut writer, &reply);
-            }
-            Ok(Some(ClientMessage::Keys)) => {
-                let reply = match self.store().keys() {
-                    Ok(keys) => DaemonMessage::Keys { keys },
-                    Err(e) => DaemonMessage::Error {
-                        message: e.to_string(),
-                    },
+                    None => unreachable!("the store answers history, keys and recent"),
                 };
                 let _ = send(&mut writer, &reply);
             }
@@ -250,33 +234,6 @@ impl Daemon {
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),
         }
-    }
-
-    /// The key's runs (at most `limit`, of `within` when given), and its estimate under the newest
-    /// run's kind (`command` with no runs).
-    fn history(
-        &self,
-        key: &str,
-        limit: usize,
-        within: Option<&str>,
-    ) -> Result<DaemonMessage, Error> {
-        let key = &self.lookup_key(key)?;
-        let store = self.store();
-        let runs = store.history(key, limit, within)?;
-        let kind = runs.first().map_or(Kind::Command, |run| run.kind);
-        let estimate = estimate(&store.costs(key)?, kind);
-        Ok(DaemonMessage::Runs { estimate, runs })
-    }
-
-    /// The key a typed `key` looks up: as typed when runs were recorded under it (a key from before
-    /// keys were shaped), else shaped as a run's key is, so a long or path-like one finds the runs it
-    /// named.
-    fn lookup_key(&self, key: &str) -> Result<String, Error> {
-        let shaped = store::key(Some(key), &[]);
-        if shaped != key && self.store().seen(key)? {
-            return Ok(key.to_owned());
-        }
-        Ok(shaped)
     }
 
     /// The job or run `select` picks, and its log.
@@ -319,7 +276,7 @@ impl Daemon {
             },
             LogSelect::Run { run } => recorded(self.store().run(run)?),
             LogSelect::Last { key } => {
-                let key = self.lookup_key(&key)?;
+                let key = answers::lookup_key(&self.store(), &key)?;
                 let running = {
                     let scheduler = self.scheduler();
                     scheduler.last_running(&key)
@@ -335,12 +292,11 @@ impl Daemon {
                 }
             }
             LogSelect::Failed { key, within } => {
-                // Shaped before the store is locked: `lookup_key` locks it too.
-                let key = key.map(|key| self.lookup_key(&key)).transpose()?;
-                recorded(
-                    self.store()
-                        .last_failed(key.as_deref(), within.as_deref())?,
-                )
+                let store = self.store();
+                let key = key
+                    .map(|key| answers::lookup_key(&store, &key))
+                    .transpose()?;
+                recorded(store.last_failed(key.as_deref(), within.as_deref())?)
             }
         })
     }
@@ -533,6 +489,11 @@ impl Daemon {
         let machine = lock(&self.machine).clone();
         let (jobs, waiting) = self.scheduler().status();
         Status {
+            daemon: Some(DaemonInfo {
+                version: crate::VERSION.to_owned(),
+                started_at: procfs::rfc3339(self.started_at),
+                pid: std::process::id(),
+            }),
             machine,
             jobs,
             waiting,

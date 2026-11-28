@@ -80,6 +80,22 @@ impl<'a> Connection<'a> {
     }
 }
 
+/// Asks the daemon at `socket` `message`. When none answers there, a question the database alone
+/// answers (history, keys, a run's log) is answered from it, read-only, with a line on stderr
+/// saying so; anything else, or no database, is the error that no daemon answered.
+fn ask_or_read(socket: &Path, message: &ClientMessage) -> Result<DaemonMessage, Error> {
+    let mut daemon = match Connection::open(socket) {
+        Ok(daemon) => daemon,
+        Err(no_daemon) => {
+            let Ok(db) = crate::store::db_path() else {
+                return Err(no_daemon);
+            };
+            return crate::answers::offline(socket, &db, message).unwrap_or(Err(no_daemon));
+        }
+    };
+    daemon.ask(message)
+}
+
 /// What the caller says a job costs, replacing the learned estimate: CPU threads and MiB.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Demand {
@@ -333,12 +349,14 @@ pub fn history(
         "" => "/",
         trimmed => trimmed,
     });
-    let mut daemon = Connection::open(socket)?;
-    match daemon.ask(&ClientMessage::History {
-        key: key.to_owned(),
-        limit: Some(limit),
-        within: within.map(str::to_owned),
-    })? {
+    match ask_or_read(
+        socket,
+        &ClientMessage::History {
+            key: key.to_owned(),
+            limit: Some(limit),
+            within: within.map(str::to_owned),
+        },
+    )? {
         DaemonMessage::Runs { estimate, mut runs } => {
             if let Some(within) = within {
                 runs.retain(|run| submitted_from(&run.submitter, within));
@@ -352,8 +370,7 @@ pub fn history(
 
 /// Every key with recorded runs, the most recently run first.
 pub fn keys(socket: &Path) -> Result<Vec<KeySummary>, Error> {
-    let mut daemon = Connection::open(socket)?;
-    match daemon.ask(&ClientMessage::Keys).map_err(older_daemon)? {
+    match ask_or_read(socket, &ClientMessage::Keys).map_err(older_daemon)? {
         DaemonMessage::Keys { keys } => Ok(keys),
         other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
@@ -368,6 +385,18 @@ fn older_daemon(e: Error) -> Error {
         )
     } else {
         e
+    }
+}
+
+/// The newest `limit` recorded runs of any key, newest first.
+pub fn recent(socket: &Path, limit: usize) -> Result<Vec<Run>, Error> {
+    let mut daemon = Connection::open(socket)?;
+    match daemon
+        .ask(&ClientMessage::Recent { limit })
+        .map_err(older_daemon)?
+    {
+        DaemonMessage::Recent { runs } => Ok(runs),
+        other => Err(Error::new(format!("unexpected reply {other:?}"))),
     }
 }
 
@@ -421,11 +450,12 @@ pub fn why(socket: &Path, job: u64) -> Result<Whereabouts, Error> {
 }
 
 /// Subscribes to the daemon's job events and writes each event line to `out` as it arrives,
-/// unchanged, until the daemon hangs up. `subscribed` is not written.
-pub fn events(socket: &Path, out: &mut impl Write) -> Result<(), Error> {
+/// unchanged, until the daemon hangs up. `subscribed` is not written; `listening` runs once the
+/// daemon has answered it, before the first event.
+pub fn events(socket: &Path, out: &mut impl Write, listening: impl FnOnce()) -> Result<(), Error> {
     let mut daemon = Connection::open(socket)?;
     match daemon.ask(&ClientMessage::Subscribe)? {
-        DaemonMessage::Subscribed { .. } => {}
+        DaemonMessage::Subscribed { .. } => listening(),
         other => return Err(Error::new(format!("unexpected reply {other:?}"))),
     }
     let mut line = String::new();

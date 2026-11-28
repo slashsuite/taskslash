@@ -1,9 +1,12 @@
 //! The `taskslash` command line: argv only, over `taskslash-core`.
 //!
 //! Exit codes: 0 ok, 1 a failure that is not usage, 2 a usage error. `taskslash run` exits with
-//! its command's code instead. `taskslash history`, `taskslash status` and `taskslash events` exit 1
-//! when no daemon is running, as `run` does; `events` exits 0 when the daemon hangs up. `taskslash
-//! top` exits 1 when no daemon is running and 2 when stdout is not a terminal.
+//! its command's code instead. `taskslash status` and `taskslash events` exit 1 when no daemon is
+//! running, as `run` does; `events` exits 0 when the daemon hangs up. With no daemon,
+//! `taskslash history` and `taskslash logs` read the database directly, and exit 1 only when there
+//! is none (or, for `logs <job>`, always: job numbers are the daemon's). `taskslash top` exits 1
+//! when no daemon is running and 2 when stdout is not a terminal. Bare `taskslash` prints the help
+//! and exits 0.
 //! `taskslash moon` exits 1 when any target did not pass. `taskslash cancel` exits 1 when the job is
 //! neither waiting nor running. `taskslash logs` exits 1 when the log it
 //! names is not there. `taskslash <name>`, for a name that is not a
@@ -13,7 +16,7 @@
 use clap::error::ErrorKind;
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use taskslash_core::Whereabouts;
 use taskslash_core::admission::{Waiting, waiting_line};
@@ -27,16 +30,137 @@ mod top;
 
 /// Admission control for builds and tests on this machine.
 #[derive(Parser)]
-#[command(name = "taskslash", version)]
+#[command(name = "taskslash", version = taskslash_core::VERSION, after_help = AFTER_HELP)]
 struct Cli {
+    /// `None` for a bare `taskslash`, which prints the help and exits 0.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
+
+/// Under the command list in `taskslash --help`: a few examples, then every setting read from the
+/// environment.
+const AFTER_HELP: &str = "\
+Examples:
+  taskslash top                              watch the machine and the jobs, live
+  taskslash run --name web:test -- bun test  run a command as a job, once there is room
+  taskslash logs --failed                    the log of the last run here that failed
+
+Environment:
+  TASKSLASH_SOCKET       the daemon's socket [default: $XDG_RUNTIME_DIR/taskslash/daemon.sock]
+  TASKSLASH_DB           the database [default: $XDG_STATE_HOME/taskslash/taskslash.db, else
+                         ~/.local/state/taskslash/taskslash.db]
+  TASKSLASH_LOGS         the directory of job logs [default: logs beside the database]
+  TASKSLASH_CLASS        the class of run and moon without --class [default: normal]
+  TASKSLASH_PHASES       1: run says on stderr how long each phase of its start took
+Read by the daemon:
+  TASKSLASH_LOG_DAYS     days a log is kept after its job ends [default: 7]
+  TASKSLASH_LOG_MIB      MiB of logs kept, oldest deleted first [default: 1024]
+  TASKSLASH_CPU_SHARE    share of the CPUs jobs may commit [default: 0.85]
+  TASKSLASH_MEM_SHARE    share of the memory jobs may commit [default: 0.8]
+  TASKSLASH_WRITE_MIB_S  disk writes jobs may commit, MiB/s [default: 150]
+  TASKSLASH_LAUNCH       plain: run jobs as plain children, unmeasured, even with a user session";
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the daemon that admits and records jobs. Runs until killed.
-    Daemon,
+    /// Show the machine, the jobs and the selected job's output on one screen, live.
+    ///
+    /// A strip of the machine's CPU, memory, pressure and load on top; the running jobs, the
+    /// waiting ones in queue order and the newest finished runs (the database's, then each job that
+    /// finishes while top is open; newest first) on the left; the selected job's log, its last
+    /// lines, on the right, followed as it grows (a waiting job shows why it waits). Up/down or j/k
+    /// select; enter opens the selected log in `$PAGER` (`less`); c, pressed twice, cancels the
+    /// selected running or waiting job; ? shows the keys; q, Esc or Ctrl-C quit.
+    ///
+    /// Exits 1 when no daemon is running, 2 when stdout is not a terminal.
+    Top,
+    /// Show what the machine and the running jobs are doing, from the daemon's latest readings.
+    ///
+    /// The machine is sampled once a second (free space on the watched mounts every 30 s). A job
+    /// with no live reading yet, or one run unmeasured, shows `-`, and null with `--json`.
+    Status {
+        /// Print the answer as one line of JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the cost estimate of a key and its recorded runs, newest first; with no key, list the
+    /// keys.
+    ///
+    /// With no key, one line per key that has runs, the most recently run first: when it last ran,
+    /// how many runs, the last exit code, the worktree it last ran in, and the key. With a key, the
+    /// estimate, then its newest runs (20 unless `--limit`), each with the worktree it ran in.
+    /// A key with no runs exits 1, naming up to five known keys like it. Inside a moon workspace, a
+    /// key with no runs that looks like `<project>:<task>` is tried as `<repo>/<project>:<task>`, and
+    /// when that has runs, `key: <repo>/<project>:<task>` is printed first on stderr.
+    ///
+    /// Each figure of the estimate comes from the key's history, or from its kind's default when
+    /// no run feeds it (the kind is the newest run's). CPU and duration come from calm runs only:
+    /// a calm run is one that ran while the machine was not under pressure (measured, with the
+    /// machine's CPU `some avg10` at most 40 during the run). A cost the daemon could not measure
+    /// (no systemd user session) shows as `-`, and as null with `--json`.
+    ///
+    /// With no daemon running, it reads the database read-only and says so on stderr.
+    History {
+        /// The key: a --name, the first two words of a command ("bun test"), or for taskslash
+        /// moon, <repo>/<project>:<task> ("shop/web:test").
+        key: Option<String>,
+        /// Print `{"estimate": ..., "runs": [...]}`, or with no key an array of the keys.
+        #[arg(long)]
+        json: bool,
+        /// Show at most this many runs.
+        #[arg(long, value_name = "N", default_value_t = HISTORY_LIMIT as u64,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        limit: u64,
+        /// Only the runs submitted from this worktree: its directory name, or its full path.
+        #[arg(long = "where", value_name = "DIR")]
+        within: Option<String>,
+    },
+    /// Print a job's or a run's log: everything its command wrote, stdout and stderr together.
+    ///
+    /// `taskslash run` and `taskslash moon` copy each job's output into a log of its own beside the
+    /// database (`TASKSLASH_LOGS` overrides the directory). The log goes to stdout unchanged, after
+    /// one line on stderr naming the run or job, its key, worktree, exit code and start time.
+    /// Exits 1 when there is no such job or run, when the run was recorded before logs were kept,
+    /// or when its log has expired (the daemon deletes logs of jobs that ended over
+    /// `TASKSLASH_LOG_DAYS` ago, 7 by default, and the oldest ones past `TASKSLASH_LOG_MIB`, 1024).
+    ///
+    /// With no daemon running, `--run`, `--last` and `--failed` read the database read-only and
+    /// say so on stderr; a job number still needs the daemon.
+    #[command(group(ArgGroup::new("pick").required(true)))]
+    Logs {
+        /// A job's number, as `status` shows it: running, or ended since the daemon started.
+        #[arg(group = "pick")]
+        job: Option<u64>,
+        /// A finished run, by the id `history` shows.
+        #[arg(long, value_name = "ID", group = "pick")]
+        run: Option<i64>,
+        /// The newest run of a key, running or not.
+        #[arg(long, value_name = "KEY", group = "pick")]
+        last: Option<String>,
+        /// The newest run (of a key, when given) that exited with a code other than 0, submitted
+        /// from this worktree (the nearest directory above here with a `.git`).
+        #[arg(long, value_name = "KEY", num_args = 0..=1, group = "pick")]
+        failed: Option<Option<String>>,
+        /// With `--failed`: search the runs of the whole machine, not only this worktree's.
+        #[arg(long)]
+        all: bool,
+        /// Follow a running job's log until the job ends.
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Say why a job waits, `running`, or what became of it; with no job, why each job waits.
+    ///
+    /// With no job, one line per waiting job (`job <n> <worktree> <key>: <reason>`), or `nothing is
+    /// waiting`. A job that ended since the daemon started is named with its run and exit code.
+    /// Exits 1 for a job the daemon does not know (it forgets ended jobs when it restarts and keeps
+    /// the newest 1000; `taskslash history` lists the keys, and each key's runs).
+    Why {
+        /// The job's number, as `status` and a waiting `run` show it.
+        job: Option<u64>,
+        /// Print the reason object (`{"kind":"running"}` for a running job, `{"kind":"ended",...}`
+        /// for an ended one); with no job, an array of `{"job","key","submitter","reason"}`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a command as a job of the daemon.
     ///
     /// Waits while the daemon will not start it yet: until no pressure gate holds, no other
@@ -98,89 +222,6 @@ enum Commands {
         #[arg(long)]
         class: Option<Class>,
     },
-    /// Show the cost estimate of a key and its recorded runs, newest first; with no key, list the
-    /// keys.
-    ///
-    /// With no key, one line per key that has runs, the most recently run first: when it last ran,
-    /// how many runs, the last exit code, the worktree it last ran in, and the key. With a key, the
-    /// estimate, then its newest runs (20 unless `--limit`), each with the worktree it ran in.
-    /// A key with no runs exits 1, naming up to five known keys like it. Inside a moon workspace, a
-    /// key with no runs that looks like `<project>:<task>` is tried as `<repo>/<project>:<task>`, and
-    /// when that has runs, `key: <repo>/<project>:<task>` is printed first on stderr.
-    ///
-    /// Each figure of the estimate comes from the key's history, or from its kind's default when
-    /// no run feeds it (the kind is the newest run's). CPU and duration come from calm runs only:
-    /// a calm run is one that ran while the machine was not under pressure (measured, with the
-    /// machine's CPU `some avg10` at most 40 during the run). A cost the daemon could not measure
-    /// (no systemd user session) shows as `-`, and as null with `--json`.
-    History {
-        /// The key: a --name, the first two words of a command ("bun test"), or for taskslash
-        /// moon, <repo>/<project>:<task> ("shop/web:test").
-        key: Option<String>,
-        /// Print `{"estimate": ..., "runs": [...]}`, or with no key an array of the keys.
-        #[arg(long)]
-        json: bool,
-        /// Show at most this many runs.
-        #[arg(long, value_name = "N", default_value_t = HISTORY_LIMIT as u64,
-              value_parser = clap::value_parser!(u64).range(1..))]
-        limit: u64,
-        /// Only the runs submitted from this worktree: its directory name, or its full path.
-        #[arg(long = "where", value_name = "DIR")]
-        within: Option<String>,
-    },
-    /// Show what the machine and the running jobs are doing, from the daemon's latest readings.
-    ///
-    /// The machine is sampled once a second (free space on the watched mounts every 30 s). A job
-    /// with no live reading yet, or one run unmeasured, shows `-`, and null with `--json`.
-    Status {
-        /// Print the answer as one line of JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print a job's or a run's log: everything its command wrote, stdout and stderr together.
-    ///
-    /// `taskslash run` and `taskslash moon` copy each job's output into a log of its own beside the
-    /// database (`TASKSLASH_LOGS` overrides the directory). The log goes to stdout unchanged, after
-    /// one line on stderr naming the run or job, its key, worktree, exit code and start time.
-    /// Exits 1 when there is no such job or run, when the run was recorded before logs were kept,
-    /// or when its log has expired (the daemon deletes logs of jobs that ended over
-    /// `TASKSLASH_LOG_DAYS` ago, 7 by default, and the oldest ones past `TASKSLASH_LOG_MIB`, 1024).
-    #[command(group(ArgGroup::new("pick").required(true)))]
-    Logs {
-        /// A job's number, as `status` shows it: running, or ended since the daemon started.
-        #[arg(group = "pick")]
-        job: Option<u64>,
-        /// A finished run, by the id `history` shows.
-        #[arg(long, value_name = "ID", group = "pick")]
-        run: Option<i64>,
-        /// The newest run of a key, running or not.
-        #[arg(long, value_name = "KEY", group = "pick")]
-        last: Option<String>,
-        /// The newest run (of a key, when given) that exited with a code other than 0, submitted
-        /// from this worktree (the nearest directory above here with a `.git`).
-        #[arg(long, value_name = "KEY", num_args = 0..=1, group = "pick")]
-        failed: Option<Option<String>>,
-        /// With `--failed`: search the runs of the whole machine, not only this worktree's.
-        #[arg(long)]
-        all: bool,
-        /// Follow a running job's log until the job ends.
-        #[arg(short, long)]
-        follow: bool,
-    },
-    /// Say why a job waits, `running`, or what became of it; with no job, why each job waits.
-    ///
-    /// With no job, one line per waiting job (`job <n> <worktree> <key>: <reason>`), or `nothing is
-    /// waiting`. A job that ended since the daemon started is named with its run and exit code.
-    /// Exits 1 for a job the daemon does not know (it forgets ended jobs when it restarts and keeps
-    /// the newest 1000; `taskslash history` lists the keys, and each key's runs).
-    Why {
-        /// The job's number, as `status` and a waiting `run` show it.
-        job: Option<u64>,
-        /// Print the reason object (`{"kind":"running"}` for a running job, `{"kind":"ended",...}`
-        /// for an ended one); with no job, an array of `{"job","key","submitter","reason"}`.
-        #[arg(long)]
-        json: bool,
-    },
     /// Cancel a waiting or running job, from any terminal.
     ///
     /// A waiting job leaves the queue: its `taskslash run` prints `taskslash: job <n> cancelled
@@ -235,15 +276,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show the machine, the jobs and the selected job's output on one screen, live.
+    /// Run the daemon that admits and records jobs. Runs until killed.
     ///
-    /// A strip of the machine's CPU, memory, pressure and load on top; the running jobs, the
-    /// waiting ones in queue order and the jobs that finished since top opened (newest first) on
-    /// the left; the selected job's log, its last lines, on the right, followed as it grows (a
-    /// waiting job shows why it waits). Up/down or j/k select; q, Esc or Ctrl-C quit.
-    ///
-    /// Exits 1 when no daemon is running, 2 when stdout is not a terminal.
-    Top,
+    /// Normally runs as the systemd user unit: systemctl --user status taskslash
+    Daemon,
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -273,8 +309,13 @@ fn class(flag: Option<Class>) -> Class {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match dispatch(cli.command) {
+    let Some(command) = Cli::parse().command else {
+        return match Cli::command().print_help() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    };
+    match dispatch(command) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {
             eprintln!("taskslash: {e}");
@@ -439,7 +480,14 @@ fn dispatch(command: Commands) -> Result<i32, Error> {
         }
         Commands::Top => top::run(&socket()?),
         Commands::Events => {
-            taskslash_core::events(&socket()?, &mut io::stdout().lock()).map(|()| 0)
+            // A person at a terminal sees nothing until a job event happens; this says it is
+            // connected. A tool reading stdout, or with stderr redirected, gets only the events.
+            let listening = || {
+                if io::stderr().is_terminal() {
+                    eprintln!("listening for job events (Ctrl-C to stop)");
+                }
+            };
+            taskslash_core::events(&socket()?, &mut io::stdout().lock(), listening).map(|()| 0)
         }
         Commands::Daemon => {
             taskslash_core::serve(&socket()?, &taskslash_core::db_path()?).map(|()| 0)

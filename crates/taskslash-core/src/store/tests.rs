@@ -495,3 +495,34 @@ fn a_database_on_disk_is_written_ahead_and_not_synced_on_every_row() {
     drop(store);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn recent_is_the_runs_of_every_key_that_ended_last() {
+    let store = Store::in_memory();
+    let argv = words(&["true"]);
+    store.record(&at("a", "/w/a", &argv, 1_000, 0)).unwrap();
+    store.record(&at("b", "/w/a", &argv, 3_000, 1)).unwrap();
+    store.record(&at("a", "/w/b", &argv, 2_000, 0)).unwrap();
+    // Started first, ended last: a long build that finished after the short runs.
+    store
+        .record(&Finished {
+            wall_ms: 10_000,
+            ..at("build", "/w/c", &argv, 500, 0)
+        })
+        .unwrap();
+    let got: Vec<(String, String)> = store
+        .recent(3)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.key, r.submitter))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("build".into(), "/w/c".into()),
+            ("b".into(), "/w/a".into()),
+            ("a".into(), "/w/b".into())
+        ]
+    );
+    assert!(Store::in_memory().recent(50).unwrap().is_empty());
+}

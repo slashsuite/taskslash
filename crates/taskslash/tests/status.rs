@@ -105,6 +105,18 @@ fn status_json_has_every_field_in_range() {
     eprintln!("status: {status}");
 
     assert_eq!(status["type"], "status");
+    let d = &status["daemon"];
+    assert!(
+        d["version"]
+            .as_str()
+            .is_some_and(|v| v.starts_with("0.1.0 (")),
+        "{d}"
+    );
+    assert!(
+        d["started_at"].as_str().is_some_and(|s| s.ends_with('Z')),
+        "{d}"
+    );
+    assert!(d["pid"].as_u64().is_some_and(|p| p > 0), "{d}");
     assert_eq!(status["jobs"], serde_json::json!([]));
     assert_eq!(status["waiting"], serde_json::json!([]));
     let m = &status["machine"];
@@ -163,7 +175,8 @@ fn status_json_has_every_field_in_range() {
     let out = daemon.run(&["status"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.starts_with("cpu "), "{text}");
+    assert!(text.starts_with("daemon    0.1.0 ("), "{text}");
+    assert!(text.contains("\ncpu "), "{text}");
     assert!(text.contains("\npressure "), "{text}");
     assert!(text.contains("\nmount "), "{text}");
 }

@@ -1,9 +1,9 @@
 //! `taskslash logs`: prints a job's or a run's log, and follows a running job's to its end. A
 //! header on stderr says first whose log it is, so the log on stdout stays as the command wrote it.
 
-use super::Connection;
+use super::{Connection, ask_or_read};
 use crate::Error;
-use crate::procfs::epoch_secs;
+use crate::procfs::local_time;
 use crate::protocol::{ClientMessage, DaemonMessage, JobState, LogFound, LogSelect, worktree};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -25,10 +25,12 @@ pub fn logs(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Result<(), Error> {
-    let mut daemon = Connection::open(socket)?;
-    let found = match daemon.ask(&ClientMessage::Log {
-        select: select.clone(),
-    })? {
+    let found = match ask_or_read(
+        socket,
+        &ClientMessage::Log {
+            select: select.clone(),
+        },
+    )? {
         DaemonMessage::Log { found } => found,
         other => return Err(Error::new(format!("unexpected reply {other:?}"))),
     };
@@ -156,34 +158,6 @@ fn header(found: &LogFound, local: impl Fn(&str) -> Option<(String, String)>) ->
         }
     }
     line
-}
-
-/// `at`, RFC 3339 in UTC (`2026-11-17T18:22:05.123Z`), as the local date (`2026-11-17`) and time
-/// of day (`20:22`). `None` when it does not parse.
-fn local_time(at: &str) -> Option<(String, String)> {
-    let secs = libc::time_t::try_from(epoch_secs(at)?).ok()?;
-    // SAFETY: `tzset` reads TZ and the zone files; `localtime_r` only writes `tm`, which outlives it.
-    let tm = unsafe {
-        tzset();
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&secs, &mut tm).is_null() {
-            return None;
-        }
-        tm
-    };
-    Some((
-        format!(
-            "{:04}-{:02}-{:02}",
-            i64::from(tm.tm_year) + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday
-        ),
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
-    ))
-}
-
-unsafe extern "C" {
-    fn tzset();
 }
 
 /// Writes what job `job`'s log at `path` holds; with `follow`, then what is added until the job

@@ -8,11 +8,83 @@ fn run(args: &[&str]) -> Output {
 }
 
 #[test]
-fn prints_its_version() {
+fn prints_its_version_and_the_commit_it_was_built_from() {
     let out = run(&["--version"]);
     assert!(out.status.success());
-    let expected = format!("taskslash {}\n", env!("CARGO_PKG_VERSION"));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rest = text
+        .strip_prefix(&format!("taskslash {} (", env!("CARGO_PKG_VERSION")))
+        .and_then(|r| r.strip_suffix(")\n"))
+        .unwrap_or_else(|| panic!("not a version and a commit: {text}"));
+    assert!(
+        rest.len() >= 7 && rest.chars().all(|c| c.is_ascii_hexdigit()),
+        "{text}"
+    );
+}
+
+#[test]
+fn bare_taskslash_prints_the_help_and_exits_0() {
+    let out = run(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.stdout, run(&["--help"]).stdout);
+}
+
+#[test]
+fn the_help_lists_commands_by_use_then_examples_and_every_setting() {
+    let help = String::from_utf8(run(&["--help"]).stdout).unwrap();
+    let commands: Vec<&str> = help
+        .split("Commands:\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "top", "status", "history", "logs", "why", "run", "moon", "cancel", "events",
+            "plugins", "daemon", "help"
+        ]
+    );
+    let examples = help.split("Examples:\n").nth(1).expect("examples");
+    assert_eq!(
+        examples.lines().take_while(|l| !l.is_empty()).count(),
+        3,
+        "{help}"
+    );
+    let environment = format!(
+        "\n{}",
+        help.split("Environment:\n").nth(1).expect("environment")
+    );
+    // Every TASKSLASH_ setting the code reads, but those for tests only and for plugins.
+    for name in [
+        "SOCKET",
+        "DB",
+        "LOGS",
+        "CLASS",
+        "PHASES",
+        "LOG_DAYS",
+        "LOG_MIB",
+        "CPU_SHARE",
+        "MEM_SHARE",
+        "WRITE_MIB_S",
+        "LAUNCH",
+    ] {
+        assert!(
+            environment.contains(&format!("\n  TASKSLASH_{name} ")),
+            "TASKSLASH_{name} missing: {help}"
+        );
+    }
+}
+
+#[test]
+fn the_daemon_help_says_where_it_normally_runs() {
+    let help = String::from_utf8(run(&["daemon", "--help"]).stdout).unwrap();
+    assert!(
+        help.contains("Normally runs as the systemd user unit: systemctl --user status taskslash"),
+        "{help}"
+    );
 }
 
 #[test]

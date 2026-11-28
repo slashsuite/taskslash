@@ -144,6 +144,8 @@ pub enum ClientMessage {
     },
     /// Ask for every key with recorded runs, the most recently run first.
     Keys,
+    /// Ask for the `limit` recorded runs of any key that ended last, the last to end first.
+    Recent { limit: usize },
     /// Ask what the machine and the running jobs are doing.
     Status,
     /// Ask why job `job` waits.
@@ -273,6 +275,8 @@ pub enum DaemonMessage {
     Runs { estimate: Estimate, runs: Vec<Run> },
     /// The answer to `keys`: every key with recorded runs, the most recently run first.
     Keys { keys: Vec<KeySummary> },
+    /// The answer to `recent`: the newest recorded runs of any key, newest first.
+    Recent { runs: Vec<Run> },
     /// The answer to `status`.
     Status(Box<Status>),
     /// The answer to `why`: `reason`, `waited_s` and `position` are set when `state` is `waiting`,
@@ -610,7 +614,7 @@ pub fn receive<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<Opt
 }
 
 mod status;
-pub use status::{JobStatus, Status, WaitingStatus, status_json};
+pub use status::{DaemonInfo, JobStatus, Status, WaitingStatus, status_json};
 
 #[cfg(test)]
 mod tests;

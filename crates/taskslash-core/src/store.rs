@@ -5,7 +5,7 @@ use crate::estimate::RunCost;
 use crate::measure::Cost;
 use crate::protocol::{Class, KeySummary, Kind, Launch, Run};
 use rusqlite::types::Type;
-use rusqlite::{Connection, Row, named_params, params};
+use rusqlite::{Connection, OpenFlags, Row, named_params, params};
 use std::env;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
@@ -221,6 +221,18 @@ impl Store {
         Self::with(conn)
     }
 
+    /// Opens the database at `path` to read only, as it is: no table is created or changed, and no
+    /// row or page is written (SQLite may create an empty WAL beside it to read), so a client may
+    /// read it while no daemon runs (or while one does).
+    pub fn open_read_only(path: &Path) -> Result<Self, Error> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| Error::new(format!("cannot open {}: {e}", path.display())))?;
+        Ok(Self { conn })
+    }
+
     #[cfg(test)]
     fn in_memory() -> Self {
         Self::with(Connection::open_in_memory().unwrap()).unwrap()
@@ -382,6 +394,24 @@ impl Store {
             &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"),
             params![id],
         )
+    }
+
+    /// The `limit` runs of any key that ended last, the last to end first (as `top` lists the
+    /// jobs that finish while it is open).
+    pub fn recent(&self, limit: usize) -> Result<Vec<Run>, Error> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs
+                 ORDER BY julianday(started_at) * 86400000.0 + wall_ms DESC, id DESC LIMIT ?1"
+            ))
+            .map_err(sql)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        statement
+            .query_map(params![limit], from_row)
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)
     }
 
     /// The newest run of `key`.

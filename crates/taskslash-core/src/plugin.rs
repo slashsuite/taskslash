@@ -111,8 +111,12 @@ pub fn closest<'a>(name: &str, candidates: &'a [String]) -> Option<&'a str> {
         .map(|(_, c)| c)
 }
 
-/// One line per plugin: `<name>  <path>`, then what shadows or blocks it.
+/// One line per plugin: `<name>  <path>`, then what shadows or blocks it; with none, a line saying
+/// so and what a plugin is.
 pub fn list_text(plugins: &[Plugin]) -> String {
+    if plugins.is_empty() {
+        return format!("no plugins on PATH (a plugin is an executable named {PREFIX}<name>)\n");
+    }
     let width = plugins.iter().map(|p| p.name.len()).max().unwrap_or(0);
     let mut text = String::new();
     for plugin in plugins {

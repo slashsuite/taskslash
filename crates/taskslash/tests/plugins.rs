@@ -225,6 +225,23 @@ fn plugins_lists_shadows_and_marks_builtins() {
     );
 }
 
+#[test]
+fn plugins_with_none_says_so_and_what_a_plugin_is() {
+    let tmp = Dir::new("none");
+    let bin = tmp.sub("bin");
+    script(&bin.join("unrelated"), "exit 0", 0o755);
+    let out = taskslash(&[&bin], &["plugins"], &[]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        text(&out.stdout),
+        "no plugins on PATH (a plugin is an executable named taskslash-<name>)\n"
+    );
+    let out = taskslash(&[&bin], &["plugins", "--json"], &[])
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "[]\n");
+}
+
 /// The example plugin in the README, between its marker comments, without the code fence.
 fn readme_example() -> String {
     let readme = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))
