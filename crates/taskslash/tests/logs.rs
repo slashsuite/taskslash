@@ -145,7 +145,7 @@ fn stdout_and_stderr_reach_the_callers_streams_and_the_log() {
         (text(&out.stdout), text(&out.stderr)),
         ("out\n".into(), "err\n".into())
     );
-    let (_, ran, log) = scratch.last("sh -c");
+    let (_, ran, log) = scratch.last("echo out;");
     assert_eq!(ran, session::expected_launch(None));
     let mut lines: Vec<String> = text(&log).lines().map(str::to_owned).collect();
     lines.sort();
@@ -256,7 +256,7 @@ fn under_a_terminal_the_command_sees_one_and_the_terminal_is_put_back() {
         let seen = text(&reading.join().unwrap());
         assert!(seen.contains("stdout-is-a-tty"), "{launch:?}: {seen:?}");
         assert!(seen.contains("\u{1b}[31mred"), "{launch:?}: {seen:?}");
-        let (_, ran, log) = scratch.last("sh -c");
+        let (_, ran, log) = scratch.last("test -t");
         assert_eq!(ran, session::expected_launch(launch), "{launch:?}");
         let log = text(&log);
         assert!(log.contains("stdout-is-a-tty"), "{ran}: {log:?}");
@@ -326,7 +326,7 @@ fn sigint_to_the_client_reaches_the_command_on_pipes_and_on_a_terminal() {
             if let Some(reading) = reading {
                 reading.join().unwrap();
             }
-            let (_, ran, log) = scratch.last("sh -c");
+            let (_, ran, log) = scratch.last("echo started;");
             assert_eq!(ran, session::expected_launch(launch), "{case}");
             assert!(text(&log).contains("started"), "{case}: {log:?}");
         }
@@ -527,7 +527,7 @@ fn logs_follows_a_running_job_until_it_ends() {
     };
     // While it runs, `--last` picks it.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !text(&scratch.run(&["logs", "--last", "sh -c"]).stdout).contains("one") {
+    while !text(&scratch.run(&["logs", "--last", "echo one;"]).stdout).contains("one") {
         assert!(
             Instant::now() < deadline,
             "--last did not pick the running job"
@@ -538,7 +538,7 @@ fn logs_follows_a_running_job_until_it_ends() {
     let err = text(&scratch.run(&["logs", &n.to_string()]).stderr);
     let dir = scratch.dir.file_name().unwrap().to_str().unwrap();
     assert!(
-        err.starts_with(&format!("job {n} sh -c in {dir}, running since ")),
+        err.starts_with(&format!("job {n} echo one; in {dir}, running since ")),
         "{err:?}"
     );
     let mut follow = scratch
@@ -585,8 +585,12 @@ fn a_run_from_before_logs_has_none_and_an_expired_log_says_so() {
             );
             INSERT INTO runs (key, kind, argv, cwd, class, submitter, launch, started_at,
                 wall_ms, exit_code)
-            VALUES ('sh -c', 'command', '[\"sh\",\"-c\",\"true\"]', '/w', 'normal', '/w',
-                'plain', '2026-11-01T00:00:00.000Z', 5, 0);",
+            VALUES ('echo kept', 'command', '[\"sh\",\"-c\",\"echo kept\"]', '/w', 'normal', '/w',
+                'plain', '2026-11-01T00:00:00.000Z', 5, 0);
+            INSERT INTO runs (key, kind, argv, cwd, class, submitter, launch, started_at,
+                wall_ms, exit_code)
+            VALUES ('/w/build.sh --all', 'command', '[\"/w/build.sh\",\"--all\"]', '/w',
+                'normal', '/w', 'plain', '2026-11-01T00:00:00.000Z', 5, 0);",
         )
         .unwrap();
     }
@@ -597,20 +601,22 @@ fn a_run_from_before_logs_has_none_and_an_expired_log_says_so() {
         assert_eq!(text(&out.stderr), "taskslash: run 1 has no log\n");
         let out = scratch.run(&["run", "--", "sh", "-c", "echo kept"]);
         assert_eq!(out.status.code(), Some(0), "{out:?}");
-        let runs = scratch.history("sh -c");
+        let runs = scratch.history("echo kept");
         assert_eq!(runs.len(), 2, "the old row is intact");
+        // A key recorded before keys were shaped is still found as it was typed.
+        assert_eq!(scratch.history("/w/build.sh --all").len(), 1);
         assert!(runs[1]["log_path"].is_null());
-        assert_eq!(text(&scratch.run(&["logs", "--run", "2"]).stdout), "kept\n");
+        assert_eq!(text(&scratch.run(&["logs", "--run", "3"]).stdout), "kept\n");
     }
     // A daemon that keeps logs for no time deletes it at startup; the row keeps its path.
     let _daemon = scratch.daemon(&[("TASKSLASH_LOG_DAYS", "0")]);
-    let out = scratch.run(&["logs", "--run", "2"]);
+    let out = scratch.run(&["logs", "--run", "3"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert_eq!(
         text(&out.stderr),
-        "taskslash: the log of run 2 has expired\n"
+        "taskslash: the log of run 3 has expired\n"
     );
-    assert!(scratch.history("sh -c")[0]["log_path"].is_string());
+    assert!(scratch.history("echo kept")[0]["log_path"].is_string());
 }
 
 #[test]
@@ -621,7 +627,7 @@ fn logs_lands_beside_the_database_unless_taskslash_logs_says_otherwise() {
     let _daemon = scratch.daemon(&[("TASKSLASH_LOGS", elsewhere_text)]);
     let out = scratch.run(&["run", "--", "sh", "-c", "echo moved"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let runs = scratch.history("sh -c");
+    let runs = scratch.history("echo moved");
     let path = runs[0]["log_path"].as_str().unwrap();
     assert!(Path::new(path).starts_with(&elsewhere), "{path}");
     assert_eq!(fs::read_to_string(path).unwrap(), "moved\n");

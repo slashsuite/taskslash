@@ -14,7 +14,7 @@ use crate::protocol::{
 };
 use crate::sampler::{FileSampler, MachineSampler, MachineSnapshot, ProcSampler};
 use crate::scheduler::{Scheduler, lock};
-use crate::store::{HISTORY_LIMIT, Store};
+use crate::store::{self, HISTORY_LIMIT, Store};
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
@@ -260,11 +260,23 @@ impl Daemon {
         limit: usize,
         within: Option<&str>,
     ) -> Result<DaemonMessage, Error> {
+        let key = &self.lookup_key(key)?;
         let store = self.store();
         let runs = store.history(key, limit, within)?;
         let kind = runs.first().map_or(Kind::Command, |run| run.kind);
         let estimate = estimate(&store.costs(key)?, kind);
         Ok(DaemonMessage::Runs { estimate, runs })
+    }
+
+    /// The key a typed `key` looks up: as typed when runs were recorded under it (a key from before
+    /// keys were shaped), else shaped as a run's key is, so a long or path-like one finds the runs it
+    /// named.
+    fn lookup_key(&self, key: &str) -> Result<String, Error> {
+        let shaped = store::key(Some(key), &[]);
+        if shaped != key && self.store().seen(key)? {
+            return Ok(key.to_owned());
+        }
+        Ok(shaped)
     }
 
     /// The job or run `select` picks, and its log.
@@ -307,6 +319,7 @@ impl Daemon {
             },
             LogSelect::Run { run } => recorded(self.store().run(run)?),
             LogSelect::Last { key } => {
+                let key = self.lookup_key(&key)?;
                 let running = {
                     let scheduler = self.scheduler();
                     scheduler.last_running(&key)
@@ -321,10 +334,14 @@ impl Daemon {
                     (None, run) => recorded(run),
                 }
             }
-            LogSelect::Failed { key, within } => recorded(
-                self.store()
-                    .last_failed(key.as_deref(), within.as_deref())?,
-            ),
+            LogSelect::Failed { key, within } => {
+                // Shaped before the store is locked: `lookup_key` locks it too.
+                let key = key.map(|key| self.lookup_key(&key)).transpose()?;
+                recorded(
+                    self.store()
+                        .last_failed(key.as_deref(), within.as_deref())?,
+                )
+            }
         })
     }
 

@@ -32,17 +32,85 @@ pub fn db_path() -> Result<PathBuf, Error> {
     Ok(state.join("taskslash").join("taskslash.db"))
 }
 
-/// A run's key: `--name` when given, else the first two words of its argv.
+/// The most characters a key has; a longer one keeps its start and end around a short hash.
+const KEY_CHARS: usize = 60;
+
+/// The shells whose `-c <script>` is keyed by the script's own words.
+const SHELLS: [&str; 5] = ["sh", "bash", "dash", "zsh", "ksh"];
+
+/// A run's key: `--name` when given, else the first two words of its argv, or of the script of a
+/// `sh -c '<script>'` (`bash`, `dash`, `zsh`, `ksh`, and flags such as `-lc` or `-ec`). In both,
+/// a word that is a path (starts with `/`, `./`, `../` or `~/`) is cut to its last part, and a key
+/// over [`KEY_CHARS`] keeps its start and end around a short hash of it (`...<hash>...`). Shaping a key again leaves it as it is,
+/// so a typed key is looked up through it too.
 pub fn key(name: Option<&str>, argv: &[String]) -> String {
-    match name {
-        Some(name) => name.to_owned(),
-        None => argv
-            .iter()
+    let words: Vec<&str> = match name {
+        Some(name) => name.split(' ').collect(),
+        None => {
+            let script = match argv {
+                [shell, flag, script, ..]
+                    if SHELLS.contains(&last_part(shell))
+                        && flag.len() > 1
+                        && flag.starts_with('-')
+                        && !flag.starts_with("--")
+                        && flag[1..].chars().all(|c| c.is_ascii_alphabetic())
+                        && flag.contains('c') =>
+                {
+                    Some(script.split_whitespace().collect::<Vec<_>>())
+                }
+                _ => None,
+            };
+            match script {
+                Some(words) if !words.is_empty() => words,
+                _ => argv.iter().map(String::as_str).collect(),
+            }
+            .into_iter()
             .take(2)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
+            .collect()
+        }
+    };
+    let key = words
+        .into_iter()
+        .map(|word| {
+            let path = ["/", "./", "../", "~/"]
+                .iter()
+                .any(|start| word.starts_with(start));
+            match last_part(word) {
+                part if path && !part.is_empty() => part,
+                _ => word,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    cap(&key)
+}
+
+/// What follows a path's last `/` (none at the end): `cargo` of `/usr/bin/cargo`.
+fn last_part(word: &str) -> &str {
+    word.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(word)
+}
+
+/// `key` when it has at most [`KEY_CHARS`] characters, else its start and end around
+/// `...<hash>...`, five hex digits of an FNV-1a hash of the whole key, so two long keys that
+/// differ only in the middle stay apart.
+fn cap(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= KEY_CHARS {
+        return key.to_owned();
     }
+    let hash = key.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    let mark = format!("...{:05x}...", hash & 0xf_ffff);
+    let kept = KEY_CHARS - mark.len();
+    let head = kept / 2;
+    let tail = kept - head;
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{}{mark}{}", start.trim_end(), end.trim_start())
 }
 
 /// The mean of the machine's `some avg10` pressures over a run; `None` when no sample fell inside.

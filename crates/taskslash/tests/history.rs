@@ -384,6 +384,71 @@ fn an_unknown_key_exits_1_naming_keys_like_it() {
 }
 
 #[test]
+fn a_long_or_scripted_command_gets_a_short_key_that_typing_it_whole_finds() {
+    let daemon = Scratch::new().daemon();
+    let long = "wrap:browser:bunx moon run storybook:visual -- --all --group navigation";
+    ok(&daemon.scratch.run(&["run", "--name", long, "--", "true"]));
+    ok(&daemon
+        .scratch
+        .run(&["run", "--", "sh", "-c", "/bin/true --flag", "x"]));
+
+    let out = daemon.scratch.run(&["history", "--json"]);
+    ok(&out);
+    let keys: Value = serde_json::from_slice(&out.stdout).expect("history prints JSON");
+    let mut keys: Vec<&str> = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap())
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "true --flag",
+            "wrap:browser:bunx moon r...c2fc2...--all --group navigation"
+        ]
+    );
+    for typed in [long, keys[1]] {
+        assert_eq!(daemon.scratch.history(typed).len(), 1, "{typed}");
+        let out = daemon.scratch.run(&["logs", "--last", typed]);
+        ok(&out);
+        let out = daemon.scratch.run(&["logs", "--failed", typed]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "no failed run, and no hang: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn a_clone_in_another_folder_finds_the_runs_of_its_origin() {
+    let daemon = Scratch::new().daemon();
+    let clone = daemon.scratch.dir.join("shop-copy");
+    fs::create_dir_all(clone.join(".moon")).unwrap();
+    fs::write(clone.join(".moon/workspace.yml"), "projects: {}\n").unwrap();
+    fs::create_dir_all(clone.join(".git")).unwrap();
+    fs::write(
+        clone.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:me/shop.git\n",
+    )
+    .unwrap();
+    ok(&daemon
+        .scratch
+        .run(&["run", "--name", "shop/cli:test", "--", "true"]));
+
+    let out = daemon
+        .scratch
+        .command(&["history", "cli:test", "--json"])
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "key: shop/cli:test\n");
+}
+
+#[test]
 fn a_moon_target_inside_a_workspace_finds_its_repos_key() {
     let daemon = Scratch::new().daemon();
     let shop = daemon.scratch.dir.join("shop");

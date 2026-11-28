@@ -15,6 +15,113 @@ fn the_key_is_the_name_else_two_words() {
     assert_eq!(key(None, &words(&["true"])), "true");
 }
 
+#[test]
+fn a_path_word_is_cut_to_its_last_part() {
+    assert_eq!(key(None, &words(&["/usr/bin/cargo", "test"])), "cargo test");
+    assert_eq!(
+        key(None, &words(&["bun", "/home/me/.cache/tmp/x-1/run.ts"])),
+        "bun run.ts"
+    );
+    assert_eq!(key(None, &words(&["./scripts/gate.sh"])), "gate.sh");
+    assert_eq!(key(None, &words(&["../bin/", "x"])), "bin x");
+    assert_eq!(
+        key(None, &words(&["/", "x"])),
+        "/ x",
+        "nothing after the slash"
+    );
+    // A word with a slash inside is not a path: a moon key keeps its repository.
+    assert_eq!(key(Some("shop/cli:test"), &[]), "shop/cli:test");
+    assert_eq!(key(None, &words(&["bun", "test", "src/a.ts"])), "bun test");
+    assert_eq!(
+        key(
+            Some("ob:cpu:browser:bun /home/me/.cache/tmp/x/spec.ts"),
+            &[]
+        ),
+        "ob:cpu:browser:bun spec.ts",
+        "a name's path words too"
+    );
+}
+
+#[test]
+fn a_shell_script_is_keyed_by_its_own_first_two_words() {
+    for (shell, flag) in [("sh", "-c"), ("/bin/bash", "-euc")] {
+        let argv = words(&[shell, flag, "cargo   test --locked", "x"]);
+        assert_eq!(key(None, &argv), "cargo test", "{shell} {flag}");
+    }
+    assert_eq!(
+        key(None, &words(&["sh", "-c", "/tmp/x/build.sh --all"])),
+        "build.sh --all"
+    );
+    // Anything else keeps the argv's words.
+    assert_eq!(
+        key(None, &words(&["sh", "-c", "  "])),
+        "sh -c",
+        "an empty script"
+    );
+    assert_eq!(key(None, &words(&["sh", "-c"])), "sh -c", "no script");
+    assert_eq!(key(None, &words(&["sh", "script.sh"])), "sh script.sh");
+    assert_eq!(
+        key(None, &words(&["sh", "--command", "x y"])),
+        "sh --command"
+    );
+    assert_eq!(key(None, &words(&["sh", "-x", "x y"])), "sh -x");
+    assert_eq!(key(None, &words(&["python", "-c", "x y"])), "python -c");
+}
+
+#[test]
+fn a_long_key_keeps_its_start_and_end_around_a_hash() {
+    let long = "ob:cpu:browser:bunx moon run storybook:visual -- --all --group navigation";
+    let shaped = key(Some(long), &[]);
+    assert_eq!(
+        shaped,
+        "ob:cpu:browser:bunx moon...53a45...--all --group navigation"
+    );
+    assert!(shaped.chars().count() <= KEY_CHARS, "{shaped}");
+    assert_ne!(
+        shaped,
+        key(
+            Some("ob:cpu:browser:bunx moon run storybook:visual -- --all --group overview"),
+            &[]
+        ),
+        "the ends tell them apart"
+    );
+    assert_ne!(
+        shaped,
+        key(
+            Some("ob:cpu:browser:bunx moon run uislash:visual --- --all --group navigation"),
+            &[]
+        ),
+        "so does the hash, when only the middle differs"
+    );
+    let exact = "x".repeat(KEY_CHARS);
+    assert_eq!(
+        key(Some(&exact), &[]),
+        exact,
+        "at the cap it is left as it is"
+    );
+    let wide = "é".repeat(KEY_CHARS + 1);
+    assert_eq!(
+        key(Some(&wide), &[]).chars().count(),
+        KEY_CHARS,
+        "characters, not bytes"
+    );
+}
+
+#[test]
+fn shaping_a_key_again_leaves_it_as_it_is() {
+    for name in [
+        "gate",
+        "shop/cli:test",
+        "ob:cpu:browser:bunx moon run storybook:visual -- --all --group navigation",
+        "ob:cpu:browser:bun /home/me/.cache/tmp/claude-1000/-home-me-dev-ui-645/2/visual.spec.ts --reporter line",
+        "a  b",
+        "",
+    ] {
+        let once = key(Some(name), &[]);
+        assert_eq!(key(Some(&once), &[]), once, "{name}");
+    }
+}
+
 fn finished<'a>(argv: &'a [String], launch: Launch, at: u64, cost: Cost) -> Finished<'a> {
     Finished {
         key: "k",

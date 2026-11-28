@@ -50,7 +50,11 @@ enum Commands {
     /// Exits with the command's exit code (128+N when signal N killed it, 127 when it cannot be
     /// started). Exits 1 when no daemon is running, which a command's own exit 1 can also mean.
     Run {
-        /// A name for the job.
+        /// A name for the job: its key, which its estimate is learned under. Give one for anything
+        /// run more than once. Without it the key is the command's first two words, or for
+        /// `sh -c '<script>'` (or bash, dash, zsh, ksh) the script's. In either, a path word
+        /// (`/`, `./`, `../`, `~/`) is cut to its last part, and a key over 60 characters keeps
+        /// its start and end around a short hash of it.
         #[arg(long)]
         name: Option<String>,
         /// The job's cost class, whose defaults it gets until it has history: test, typecheck,
