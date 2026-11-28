@@ -11,6 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
+#[path = "common/session.rs"]
+mod session;
 
 const BIN: &str = env!("CARGO_BIN_EXE_taskslash");
 
@@ -33,11 +35,21 @@ impl Daemon {
     }
 
     fn start(tag: &str) -> Self {
+        Self::start_on(tag, None)
+    }
+
+    /// A daemon on the launch path `TASKSLASH_LAUNCH` names (`None`: whichever the machine has).
+    fn start_on(tag: &str, launch: Option<&str>) -> Self {
         let dir = std::env::temp_dir().join(format!("tkc-{}-{tag}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         common::write_machine(&dir.join("machine.json"), 0.0);
         let log = fs::File::create(dir.join("daemon.log")).unwrap();
-        let mut child = Self::command(&dir, &["daemon"])
+        let mut command = Self::command(&dir, &["daemon"]);
+        match launch {
+            Some(launch) => command.env("TASKSLASH_LAUNCH", launch),
+            None => command.env_remove("TASKSLASH_LAUNCH"),
+        };
+        let mut child = command
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -277,4 +289,91 @@ fn cancelling_a_job_the_daemon_does_not_hold_exits_1() {
         stderr,
         "taskslash: job 999 is not waiting or running\n  (taskslash status lists jobs)\n"
     );
+}
+
+/// Whether `pid` has ended: no such process, or a zombie its parent has yet to reap.
+fn gone(pid: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+/// A `taskslash run` killed before its command ends: the daemon stops the command (the shell and
+/// the `sleep` it started) and records the run with no exit code. On the scope path it also stops a
+/// `sleep` that left the command's process group, which only the scope still holds.
+fn a_run_whose_client_is_killed_has_its_command_stopped(launch: Option<&str>) {
+    let daemon = Daemon::start_on(&format!("orphan-{}", launch.unwrap_or("default")), launch);
+    let shell = daemon.dir.join("shell");
+    let sleep = daemon.dir.join("sleep");
+    let escaped = daemon.dir.join("escaped");
+    let script = format!(
+        "setsid sleep 600 & echo $! > {}; sleep 600 & echo $! > {}; echo $$ > {}; wait",
+        escaped.display(),
+        sleep.display(),
+        shell.display()
+    );
+    let mut run = daemon.spawn("orphan", &script);
+    daemon.running("orphan");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pids = loop {
+        let read = |path: &Path| fs::read_to_string(path).ok().map(|s| s.trim().to_owned());
+        if let (Some(shell), Some(sleep), Some(escaped)) =
+            (read(&shell), read(&sleep), read(&escaped))
+            && !shell.is_empty()
+            && !sleep.is_empty()
+            && !escaped.is_empty()
+        {
+            break [shell, sleep, escaped];
+        }
+        assert!(Instant::now() < deadline, "the command never started");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(pids.iter().all(|pid| !gone(pid)), "{pids:?}");
+
+    run.kill().unwrap();
+    run.wait().unwrap();
+
+    daemon.wait_for(|s| {
+        s["jobs"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+            .then_some(())
+    });
+    let [.., escaped] = &pids;
+    if session::expected_launch(launch) == "plain" {
+        // Out of the group, so out of reach without a scope: the test stops it.
+        assert!(!gone(escaped), "the escaped sleep ended on the plain path");
+        let _ = Command::new("kill").arg(escaped).status();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gone(escaped) {
+            assert!(Instant::now() < deadline, "the escaped sleep outlived kill");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    for pid in &pids {
+        assert!(
+            gone(pid),
+            "process {pid} outlived its client\n{}",
+            daemon.log()
+        );
+    }
+    assert_eq!(daemon.recorded_exit("orphan"), Value::Null);
+    assert!(
+        daemon
+            .log()
+            .contains("its client went away; its command was stopped with SIGTERM"),
+        "{}",
+        daemon.log()
+    );
+}
+
+#[test]
+fn a_run_whose_client_is_killed_has_its_command_stopped_on_the_machines_path() {
+    a_run_whose_client_is_killed_has_its_command_stopped(None);
+}
+
+#[test]
+fn a_run_whose_client_is_killed_has_its_command_stopped_on_the_plain_path() {
+    a_run_whose_client_is_killed_has_its_command_stopped(Some("plain"));
 }

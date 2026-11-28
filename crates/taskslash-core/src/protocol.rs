@@ -2,9 +2,12 @@
 //!
 //! A job: the client sends `submit`; the daemon answers `start` (or `error`, then closes). A job
 //! that has to queue is sent `waiting` first, when it is queued and every 15 s after. The client
-//! runs the command the way `start.launch` says, sends `exited`, and the daemon answers
-//! `recorded` once the run's row is written. An EOF before `exited` ends the job as dropped, and its
-//! row has no exit code.
+//! runs the command the way `start.launch` says, sends `running` (the command's pid) once it has
+//! started and `exited` once it has ended, and the daemon answers `recorded` once the run's row is
+//! written. An EOF (or anything else) before `exited` ends the job as dropped: the daemon stops
+//! what is left of the command (its scope's processes, else the process group or tree `running`
+//! named) with SIGTERM, then SIGKILL after 10 s, and only then ends the job, whose row has no exit
+//! code.
 //!
 //! A query: the client sends `history`; the daemon answers `runs` (the key's estimate and its runs)
 //! and closes. Or it sends `keys`; the daemon answers `keys` (every key with runs, newest first). Or it sends `status`; the daemon answers `status` (the machine's latest snapshot, the
@@ -123,6 +126,10 @@ pub enum ClientMessage {
         /// The nearest ancestor of `cwd` (or `cwd`) holding a `.git`, else `cwd`.
         submitter: String,
     },
+    /// The job's command started as process `pid`, leading a process group of its own when
+    /// `group`. Sent once, before `exited`, so the daemon can stop the command when the client
+    /// goes away without sending `exited`.
+    Running { job: u64, pid: i32, group: bool },
     /// The job's command has exited with `code`. A moon target's job also says whether moon
     /// replayed it from cache and the hash moon ran it under.
     Exited {
@@ -247,12 +254,15 @@ impl Launch {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
     /// The job is admitted: run it now, under the systemd unit `unit` when `launch` is `scope`,
-    /// copying its output into the file `log`.
+    /// copying its output into the file `log`. `running` says the daemon reads `running` (a daemon
+    /// older than it leaves it out, and would take the message for a bad request).
     Start {
         job: u64,
         unit: String,
         launch: Launch,
         log: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        running: bool,
     },
     /// Job `job` is queued, for `reason`, and has waited `waited_s`, `position` (1-based) in the
     /// queue's order; `start` follows when it is admitted. On the first `waiting` only, `never_seen`

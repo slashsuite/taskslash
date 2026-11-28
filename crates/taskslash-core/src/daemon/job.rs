@@ -2,6 +2,7 @@
 
 use super::Daemon;
 use super::ended::Ended;
+use super::orphan::{self, Orphan, Started};
 use crate::admission::{Reason, ordinal};
 use crate::estimate::{Source, estimate};
 use crate::logs;
@@ -73,7 +74,8 @@ impl Drop for Linked<'_> {
 impl Daemon {
     /// A job: queued until `admit` starts it (`waiting` when queued and every 15 s), then
     /// `start`, sampling while it runs, and a row when `exited` arrives (and `recorded`) or when the
-    /// connection drops (no exit code). A connection that drops while waiting leaves the queue.
+    /// connection drops (no exit code, once what is left of the command the client reported with
+    /// `running` has been stopped). A connection that drops while waiting leaves the queue.
     pub(super) fn serve_job(
         &self,
         reader: &mut BufReader<UnixStream>,
@@ -246,11 +248,20 @@ impl Daemon {
             log: log.clone(),
             at: now(),
         });
+        // What the daemon stops should the client go before it says how the command ended.
+        let mut orphan = Orphan {
+            scope: match self.launch {
+                Launch::Scope => measure::cgroup_dir(&unit),
+                Launch::Plain => None,
+            },
+            process: None,
+        };
         let start = DaemonMessage::Start {
             job: id,
             unit,
             launch: self.launch,
             log: log.clone(),
+            running: true,
         };
         // Sent under the link's lock, so a `cancel` that came first follows it and one that comes
         // after finds `started` set.
@@ -263,16 +274,35 @@ impl Daemon {
             }
             sent
         };
-        let (exit_code, cached, moon_hash) =
-            match sent.ok().and_then(|()| receive(reader).ok().flatten()) {
-                Some(ClientMessage::Exited {
-                    job,
-                    code,
-                    cached,
-                    moon_hash,
-                }) if job == id => (Some(code), cached, moon_hash),
-                _ => (None, None, None),
-            };
+        let reported = sent.ok().and_then(|()| {
+            loop {
+                match receive(reader).ok().flatten() {
+                    Some(ClientMessage::Running { job, pid, group }) if job == id => {
+                        orphan.process = Started::new(pid, group);
+                    }
+                    Some(ClientMessage::Exited {
+                        job,
+                        code,
+                        cached,
+                        moon_hash,
+                    }) if job == id => break Some((code, cached, moon_hash)),
+                    _ => break None,
+                }
+            }
+        });
+        let (exit_code, cached, moon_hash) = match reported {
+            Some((code, cached, moon_hash)) => (Some(code), cached, moon_hash),
+            None => {
+                // The client went without saying how its command ended. A cancel already under way
+                // keeps the grace it gave.
+                let grace = lock(&link)
+                    .cancel
+                    .map_or(orphan::GRACE, |(_, grace_s)| Duration::from_secs(grace_s));
+                let stopped = orphan.stop(grace);
+                eprintln!("job {id}: its client went away; {}", stopped.as_str());
+                (None, None, None)
+            }
+        };
         // Remembered as ending while the scheduler is still locked, so `logs <n>` always finds it.
         let finished = {
             let mut scheduler = self.scheduler();

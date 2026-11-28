@@ -34,6 +34,7 @@ const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 mod ended;
 mod events;
 mod job;
+mod orphan;
 
 use ended::{ENDED_JOBS, Ended, EndedJobs};
 
@@ -226,10 +227,10 @@ impl Daemon {
             Ok(Some(ClientMessage::Cancel { job, grace_s })) => {
                 let _ = send(&mut writer, &self.cancel(job, grace_s));
             }
-            Ok(Some(ClientMessage::Exited { .. })) => {
+            Ok(Some(ClientMessage::Exited { .. } | ClientMessage::Running { .. })) => {
                 refuse(
                     &mut writer,
-                    "expected submit, history, keys, status, why, log, cancel or subscribe, got exited",
+                    "expected submit, history, keys, status, why, log, cancel or subscribe, got a job's report",
                 );
             }
             Err(e) => refuse(&mut writer, &format!("bad request: {e}")),

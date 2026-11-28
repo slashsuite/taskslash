@@ -282,6 +282,8 @@ struct StopState {
     /// A stop asked for before the command started: its grace period.
     pending: Option<Duration>,
     ended: bool,
+    /// Told the command's pid and whether it leads a group, once, when it starts.
+    announce: Option<Box<dyn FnOnce(libc::pid_t, bool) + Send>>,
 }
 
 impl StopState {
@@ -308,7 +310,7 @@ impl StopState {
 }
 
 /// `pid` and its descendants, from each thread's `/proc/<pid>/task/<tid>/children`.
-fn tree(pid: libc::pid_t) -> Vec<libc::pid_t> {
+pub(crate) fn tree(pid: libc::pid_t) -> Vec<libc::pid_t> {
     let mut found = vec![pid];
     let mut next = 0;
     while let Some(&parent) = found.get(next) {
@@ -360,14 +362,25 @@ impl Stop {
         });
     }
 
+    /// Has `announce` told the command's pid, and whether it leads a group, when it starts.
+    pub(crate) fn announce(&self, announce: impl FnOnce(libc::pid_t, bool) + Send + 'static) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .announce = Some(Box::new(announce));
+    }
+
     /// The command started as process `pid`, leading a process group of its own when `group`. A
     /// stop asked for earlier is sent now.
     pub(crate) fn started(self: &Arc<Self>, pid: libc::pid_t, group: bool) {
-        let pending = {
+        let (pending, announce) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.target = Some((pid, group));
-            state.pending.take()
+            (state.pending.take(), state.announce.take())
         };
+        if let Some(announce) = announce {
+            announce(pid, group);
+        }
         if let Some(grace) = pending {
             self.term_then_kill(grace);
         }

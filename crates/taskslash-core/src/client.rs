@@ -189,14 +189,15 @@ pub(crate) fn run_job(
     let mut reply = daemon.ask(&submit)?;
     // The never-run hint goes on the first waiting line only, and not when the caller gave a cost.
     let mut hint_due = job.demand.cpu.is_none() && job.demand.mem_mib.is_none();
-    let (id, unit, launch, log) = loop {
+    let (id, unit, launch, log, announce) = loop {
         match reply {
             DaemonMessage::Start {
                 job,
                 unit,
                 launch,
                 log,
-            } => break (job, unit, launch, log),
+                running,
+            } => break (job, unit, launch, log, running),
             DaemonMessage::Waiting {
                 job: number,
                 reason,
@@ -239,6 +240,19 @@ pub(crate) fn run_job(
         socket: _,
     } = daemon;
     let listening = listen(reader, id, Arc::clone(&stop));
+    // So the daemon can stop the command should this client die before it says how it ended.
+    if let Some(mut to_daemon) = announce.then(|| daemon.try_clone().ok()).flatten() {
+        stop.announce(move |pid, group| {
+            let _ = send(
+                &mut to_daemon,
+                &ClientMessage::Running {
+                    job: id,
+                    pid,
+                    group,
+                },
+            );
+        });
+    }
 
     let program = Path::new(&job.argv[0]);
     let mut log = capture::open_log(Path::new(&log));

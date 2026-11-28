@@ -3,7 +3,9 @@
 //! The caller runs the command and the daemon admits and records: `taskslash run` asks the daemon
 //! over a unix socket for a job, runs the command as its own child (in a transient systemd scope
 //! when the machine has a user session), and reports the exit code. The connection stays open for
-//! the job's whole life and is its lease. The daemon measures the scope while it runs and writes a
+//! the job's whole life and is its lease: when it closes before the client says how the command
+//! ended, the daemon stops what is left of the command (SIGTERM, then SIGKILL) and only then ends
+//! the job. The daemon measures the scope while it runs and writes a
 //! row of what the job cost when it ends. A thread samples the whole machine once a second for
 //! `taskslash status` and admission.
 //!

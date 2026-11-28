@@ -19,6 +19,7 @@ fn messages_round_trip_as_tagged_json_lines() {
         unit: "taskslash-1-3".into(),
         launch: Launch::Scope,
         log: "/logs/taskslash-1-3.log".into(),
+        running: true,
     };
     let history = ClientMessage::History {
         key: "probe".into(),
@@ -32,7 +33,7 @@ fn messages_round_trip_as_tagged_json_lines() {
     assert_eq!(
         String::from_utf8_lossy(&wire),
         "{\"type\":\"submit\",\"name\":\"probe\",\"kind\":\"browser\",\"argv\":[\"sh\",\"-c\",\"exit 3\"],\"cwd\":\"/work\",\"class\":\"flake\",\"submitter\":\"/work\"}\n\
-         {\"type\":\"start\",\"job\":3,\"unit\":\"taskslash-1-3\",\"launch\":\"scope\",\"log\":\"/logs/taskslash-1-3.log\"}\n\
+         {\"type\":\"start\",\"job\":3,\"unit\":\"taskslash-1-3\",\"launch\":\"scope\",\"log\":\"/logs/taskslash-1-3.log\",\"running\":true}\n\
          {\"type\":\"history\",\"key\":\"probe\"}\n"
     );
     let mut reader = wire.as_slice();
@@ -279,12 +280,35 @@ fn cancel_and_its_answers_round_trip_as_tagged_json_lines() {
 }
 
 #[test]
+fn running_round_trips() {
+    let running = ClientMessage::Running {
+        job: 7,
+        pid: 4321,
+        group: true,
+    };
+    let mut wire = Vec::new();
+    send(&mut wire, &running).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&wire),
+        "{\"type\":\"running\",\"job\":7,\"pid\":4321,\"group\":true}\n"
+    );
+    assert_eq!(receive(&mut wire.as_slice()).unwrap(), Some(running));
+}
+
+#[test]
 fn an_old_shape_start_and_waiting_still_parse() {
     let start: DaemonMessage = serde_json::from_str(
         r#"{"type":"start","job":3,"unit":"taskslash-1-3","launch":"plain","log":"/l"}"#,
     )
     .unwrap();
-    assert!(matches!(start, DaemonMessage::Start { job: 3, .. }));
+    assert!(matches!(
+        start,
+        DaemonMessage::Start {
+            job: 3,
+            running: false,
+            ..
+        }
+    ));
     let waiting: DaemonMessage = serde_json::from_str(
         r#"{"type":"waiting","job":4,"reason":{"kind":"behind","job":3,"key":"k"},"waited_s":0,"position":1}"#,
     )
