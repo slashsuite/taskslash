@@ -196,7 +196,8 @@ the whole key (`...53a45...`), so two long names that differ only in the middle 
 recorded before keys were shaped is still found as it was typed). `taskslash history <key>` prints the newest 20 runs of a key (`--limit` for another
 number, `--where <dir>` for only those submitted from a worktree, by its directory name or full
 path), `-` for a value that was not measured, and the worktree each ran in; a run whose
-`taskslash run` went away before the command ended has no exit code. With no key it lists every key
+`taskslash run` went away before the command ended has no exit code (the daemon stops what is left
+of its command, SIGTERM then SIGKILL 10 seconds on, before it counts the job as ended). With no key it lists every key
 that has runs, the most recently run first, with its run count, last run, last exit code and the
 worktree it last ran in (`--json`: an array). A key with no runs exits 1 and names up to five known
 keys like it on stderr. Inside a moon workspace, a key that has no runs and looks like a moon target
