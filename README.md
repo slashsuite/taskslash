@@ -181,7 +181,9 @@ MiB written, the exit code, and the machine's pressure while it ran (`machine_cp
 null when none was). A `taskslash moon` job also records `cached` (moon replayed it from cache) and
 `moon_hash`; both are null for any other run. The key is `--name` when given, else the first two words of the command
 (`bunx moon`), or of the script of `sh -c '<script>'` (also `bash`, `dash`, `zsh`, `ksh`, and
-flags such as `-lc`): `sh -c 'cargo test --locked'` is `cargo test`. In both, a word that is a
+flags such as `-lc`): `sh -c 'cargo test --locked'` is `cargo test`. A leading `cd <dir> &&` is
+skipped and `env`, `nice` and `timeout` are unwrapped, so `sh -c 'cd /repo && nice cargo test'` is
+`cargo test` and `env A=1 timeout 60 bun test` is `bun test`. In both, a word that is a
 path (starting with `/`, `./`, `../` or `~/`) is cut to its last part (`/usr/bin/cargo test` is
 `cargo test`), and a key over 60 characters keeps its first and last 24 or so around five hex digits of a hash of
 the whole key (`...53a45...`), so two long names that differ only in the middle stay apart. Give a

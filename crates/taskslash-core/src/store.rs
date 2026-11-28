@@ -39,7 +39,8 @@ const KEY_CHARS: usize = 60;
 const SHELLS: [&str; 5] = ["sh", "bash", "dash", "zsh", "ksh"];
 
 /// A run's key: `--name` when given, else the first two words of its argv, or of the script of a
-/// `sh -c '<script>'` (`bash`, `dash`, `zsh`, `ksh`, and flags such as `-lc` or `-ec`). In both,
+/// `sh -c '<script>'` (`bash`, `dash`, `zsh`, `ksh`, and flags such as `-lc` or `-ec`), of the
+/// command past a leading `cd <dir> &&` and inside `env`, `nice` and `timeout`. In both,
 /// a word that is a path (starts with `/`, `./`, `../` or `~/`) is cut to its last part, and a key
 /// over [`KEY_CHARS`] keeps its start and end around a short hash of it (`...<hash>...`). Shaping a key again leaves it as it is,
 /// so a typed key is looked up through it too.
@@ -60,13 +61,11 @@ pub fn key(name: Option<&str>, argv: &[String]) -> String {
                 }
                 _ => None,
             };
-            match script {
+            let words = match script {
                 Some(words) if !words.is_empty() => words,
                 _ => argv.iter().map(String::as_str).collect(),
-            }
-            .into_iter()
-            .take(2)
-            .collect()
+            };
+            command(&words).iter().take(2).copied().collect()
         }
     };
     let key = words
@@ -83,6 +82,58 @@ pub fn key(name: Option<&str>, argv: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     cap(&key)
+}
+
+/// The words of the command itself: past any leading `cd <dir> &&`, and inside `env`, `nice` and
+/// `timeout` (their options, `env`'s `NAME=value` words and `timeout`'s duration skipped), as
+/// often as they nest. A wrapper with nothing after it is kept as the command, and so is an
+/// `env -S`, whose command is inside one word.
+fn command<'a, 'w>(mut words: &'a [&'w str]) -> &'a [&'w str] {
+    loop {
+        let rest = match words {
+            ["cd", _, "&&", rest @ ..] => rest,
+            [first, rest @ ..] => match last_part(first) {
+                "env" => {
+                    let after = options(rest, &["-u", "--unset", "-C", "--chdir"]);
+                    let split = |w: &&str| *w == "-S" || w.starts_with("--split-string");
+                    if rest[..rest.len() - after.len()].iter().any(split) {
+                        return words;
+                    }
+                    let rest = after;
+                    let set = rest
+                        .iter()
+                        .take_while(|w| w.find('=').is_some_and(|at| at > 0))
+                        .count();
+                    &rest[set..]
+                }
+                "nice" => options(rest, &["-n", "--adjustment"]),
+                "timeout" => {
+                    let rest = options(rest, &["-s", "--signal", "-k", "--kill-after"]);
+                    rest.get(1..).unwrap_or_default()
+                }
+                _ => return words,
+            },
+            [] => return words,
+        };
+        if rest.is_empty() {
+            return words;
+        }
+        words = rest;
+    }
+}
+
+/// `words` past their leading options (a word that starts with `-`, `env`'s lone `-` too), where each of `valued` takes the
+/// next word as its value, and past a `--` that ends them.
+fn options<'a, 'w>(words: &'a [&'w str], valued: &[&str]) -> &'a [&'w str] {
+    let mut at = 0;
+    while let Some(word) = words.get(at).filter(|w| w.starts_with('-')) {
+        if *word == "--" {
+            at += 1;
+            break;
+        }
+        at += if valued.contains(word) { 2 } else { 1 };
+    }
+    words.get(at..).unwrap_or_default()
 }
 
 /// What follows a path's last `/` (none at the end): `cargo` of `/usr/bin/cargo`.

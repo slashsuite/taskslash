@@ -1,6 +1,6 @@
 # TaskSlash facts
 
-Checked against main at c5805f8 on 2026-11-28.
+Checked against main at 4398297 on 2026-11-28.
 
 ## What it is
 TaskSlash stops builds and tests that start at the same time from overloading one computer: each one waits in a queue until your computer has capacity for it. It is early (alpha), version 0.1.0.
@@ -9,7 +9,7 @@ TaskSlash stops builds and tests that start at the same time from overloading on
 - `daemon-queue`: A daemon, `taskslash daemon`, holds the queue and decides when each submitted job starts.
 - `run-command`: `taskslash run -- <command>` runs a command as a job, in your directory with your environment and terminal, and exits with the command's own exit code.
 - `admission-by-capacity`: A job starts when its estimated CPU, memory and disk writes fit in the CPU, memory and disk writes the computer has free, and waits while the machine's CPU, memory or I/O pressure is over a set line. A job too big to ever fit starts when nothing else runs, and a job held only by load TaskSlash does not run starts after a set wait.
-- `learned-estimates`: The daemon estimates what a job will cost from the recorded runs of the same name (a `--name`, else the command's first two words, or a `sh -c` script's, with paths cut to their last part and at most 60 characters), and falls back to a default for its kind (test, typecheck, build, browser, command) until there is history.
+- `learned-estimates`: The daemon estimates what a job will cost from the recorded runs of the same name (a `--name`, else the command's first two words, or a `sh -c` script's, past a leading `cd <dir> &&` and inside `env`, `nice` and `timeout`, with paths cut to their last part and at most 60 characters), and falls back to a default for its kind (test, typecheck, build, browser, command) until there is history.
 - `measured-runs`: With a systemd user session, each job runs in its own systemd scope and the daemon records its wall time, CPU, peak memory, disk writes and exit code in a SQLite database.
 - `priority-classes`: A job has a priority class (urgent, flake, interactive, normal, background), and within a class the worktree using the least of the machine goes first.
 - `waiting-reason`: A job that waits says its job number and why on stderr, naming the three biggest jobs that hold it and counting the rest, and the first time a job that never ran waits it says what it was assumed to take. `taskslash why <job>` prints the same reason, also as JSON, or for a job that ended since the daemon started, its run and exit code; `taskslash why` with no job lists every waiting job and why.
