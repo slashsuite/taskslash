@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 /// How long the command has after SIGTERM before SIGKILL, unless a cancel gave another grace.
 pub(super) const GRACE: Duration = Duration::from_secs(10);
+/// The longest grace a stop waits before SIGKILL, whatever a cancel asked for.
+const MAX_GRACE: Duration = Duration::from_secs(3600);
 /// How long the processes may take to go after SIGKILL before the daemon gives up on them.
 const AFTER_KILL: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
@@ -70,45 +72,47 @@ enum Still {
 }
 
 impl Started {
-    /// The process `pid` the client reported, read now; `None` for a pid that cannot be one.
+    /// The process `pid` the client reported, read now; `None` for a pid that cannot be one: init,
+    /// or the daemon itself or its process group.
     pub(super) fn new(pid: i32, group: bool) -> Option<Self> {
-        (pid > 1).then(|| Self {
+        // SAFETY: getpid and getpgrp cannot fail.
+        let (me, my_group) = unsafe { (libc::getpid(), libc::getpgrp()) };
+        (pid > 1 && pid != me && pid != my_group).then(|| Self {
             pid,
-            since: stat(pid).and_then(|(_, since)| since),
+            since: stat(pid).and_then(|s| s.since),
             group,
         })
     }
 
     fn still(&self) -> Still {
         match stat(self.pid) {
-            None | Some(('Z', _)) => Still::Gone,
-            Some((_, since)) if since == self.since => Still::Same,
+            None | Some(Stat { state: 'Z', .. }) => Still::Gone,
+            Some(s) if s.since == self.since => Still::Same,
             Some(_) => Still::Reused,
         }
     }
 
+    /// Whether something of the command is left to signal. A group counts only while its leader is
+    /// the command's or a live process is still in it: once the group is empty its number is free.
     fn alive(&self) -> bool {
         match (self.group, self.still()) {
             (_, Still::Reused) => false,
-            // A pid is not given out again while a group is named after it, so the group is the
-            // command's even once its leader has gone.
-            (true, _) => signal(-self.pid, 0),
+            (true, Still::Same) => true,
+            (true, Still::Gone) => group_has_members(self.pid),
             (false, still) => still == Still::Same,
         }
     }
 
     fn signal(&self, signal_number: libc::c_int) {
-        match (self.group, self.still()) {
-            (_, Still::Reused) => {}
-            (true, _) => {
-                signal(-self.pid, signal_number);
+        if !self.alive() {
+            return;
+        }
+        if self.group {
+            signal(-self.pid, signal_number);
+        } else {
+            for pid in tree(self.pid) {
+                signal(pid, signal_number);
             }
-            (false, Still::Same) => {
-                for pid in tree(self.pid) {
-                    signal(pid, signal_number);
-                }
-            }
-            (false, Still::Gone) => {}
         }
     }
 }
@@ -117,6 +121,8 @@ impl Orphan {
     /// Stops what is left of the command: SIGTERM, then SIGKILL once `grace` has passed (at once
     /// when it is zero), and waits for it to be gone.
     pub(super) fn stop(&self, grace: Duration) -> Stopped {
+        // A cancel's grace is the user's number; past an hour the stop waits no longer for it.
+        let grace = grace.min(MAX_GRACE);
         if !self.alive() {
             return Stopped::Gone;
         }
@@ -146,7 +152,7 @@ impl Orphan {
     }
 
     fn alive(&self) -> bool {
-        !self.scope_pids().is_empty() || self.process.is_some_and(|p| p.alive())
+        !self.scope_pids().is_empty() || self.process.as_ref().is_some_and(Started::alive)
     }
 
     fn signal(&self, signal_number: libc::c_int) {
@@ -186,18 +192,49 @@ fn signal(pid: libc::pid_t, signal_number: libc::c_int) -> bool {
     unsafe { libc::kill(pid, signal_number) == 0 }
 }
 
-/// `/proc/<pid>/stat`'s state letter and start time (in clock ticks after boot).
-fn stat(pid: libc::pid_t) -> Option<(char, Option<u64>)> {
+/// What the daemon reads of `/proc/<pid>/stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stat {
+    state: char,
+    group: libc::pid_t,
+    /// The start time, in clock ticks after boot.
+    since: Option<u64>,
+}
+
+fn stat(pid: libc::pid_t) -> Option<Stat> {
     parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
-fn parse_stat(text: &str) -> Option<(char, Option<u64>)> {
+fn parse_stat(text: &str) -> Option<Stat> {
     // The name in parentheses may hold spaces and parentheses, so read from the last `)`.
     let mut fields = text.rsplit_once(") ")?.1.split_whitespace();
+    // The state is field 3, the process group field 5 and the start time field 22.
     let state = fields.next()?.chars().next()?;
-    // starttime is field 22; the state is field 3.
-    let since = fields.nth(18).and_then(|s| s.parse().ok());
-    Some((state, since))
+    let group = fields.nth(1)?.parse().ok()?;
+    let since = fields.nth(16).and_then(|s| s.parse().ok());
+    Some(Stat {
+        state,
+        group,
+        since,
+    })
+}
+
+/// Whether a live process (not a zombie) is in process group `group`.
+fn group_has_members(group: libc::pid_t) -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    entries
+        .filter_map(|entry| {
+            entry
+                .ok()?
+                .file_name()
+                .to_str()?
+                .parse::<libc::pid_t>()
+                .ok()
+        })
+        .filter_map(stat)
+        .any(|s| s.group == group && s.state != 'Z')
 }
 
 #[cfg(test)]
@@ -228,7 +265,7 @@ mod tests {
     }
 
     fn gone(pid: libc::pid_t) -> bool {
-        matches!(stat(pid), None | Some(('Z', _)))
+        matches!(stat(pid), None | Some(Stat { state: 'Z', .. }))
     }
 
     #[test]
@@ -279,23 +316,101 @@ mod tests {
         }
     }
 
+    /// A `sleep 600` in a group of its own, reaped on a thread; its pid.
+    fn sleeper() -> libc::pid_t {
+        let mut child = Command::new("sleep")
+            .arg("600")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        thread::spawn(move || child.wait());
+        pid
+    }
+
     #[test]
     fn a_reused_pid_is_never_signalled() {
-        // This test's own process stands for a pid given out again: its start time differs.
-        let me = libc::pid_t::try_from(std::process::id()).unwrap();
-        let mut started = Started::new(me, false).unwrap();
-        started.since = started.since.map(|s| s + 1);
+        // A live process stands for a pid given out again: its start time differs.
+        for group in [false, true] {
+            let other = sleeper();
+            let orphan = Orphan {
+                scope: None,
+                process: Some(Started {
+                    pid: other,
+                    since: stat(other).and_then(|s| s.since).map(|s| s + 1),
+                    group,
+                }),
+            };
+            assert_eq!(orphan.stop(Duration::ZERO), Stopped::Gone);
+            thread::sleep(POLL);
+            assert!(!gone(other), "a reused pid was signalled (group {group})");
+            signal(other, libc::SIGKILL);
+        }
+    }
+
+    #[test]
+    fn a_group_whose_leader_has_gone_is_stopped_while_it_has_members_and_never_after() {
+        // The shell leads the group, starts a sleep in it and exits at once.
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 600 & echo $!"])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let leader = libc::pid_t::try_from(child.id()).unwrap();
+        let started = Started::new(leader, true);
+        child.wait().unwrap();
+        let sleep: libc::pid_t = line.trim().parse().unwrap();
+        assert_eq!(stat(sleep).map(|s| s.group), Some(leader));
+        assert!(group_has_members(leader));
         let orphan = Orphan {
             scope: None,
-            process: Some(started),
+            process: started,
         };
+        assert_eq!(orphan.stop(Duration::from_secs(5)), Stopped::Terminated);
+        assert!(gone(sleep));
+        // Empty now, so its number is free: nothing is signalled.
+        assert!(!group_has_members(leader));
         assert_eq!(orphan.stop(Duration::ZERO), Stopped::Gone);
+    }
+
+    #[test]
+    fn the_daemon_itself_is_never_a_reported_process() {
+        // SAFETY: getpid and getpgrp cannot fail.
+        let (me, my_group) = unsafe { (libc::getpid(), libc::getpgrp()) };
+        assert_eq!(Started::new(me, false), None);
+        assert_eq!(Started::new(my_group, true), None);
+        assert_eq!(Started::new(1, true), None);
+    }
+
+    #[test]
+    fn a_grace_past_any_clock_waits_no_longer_than_the_cap_and_does_not_panic() {
+        let pid = sleeper();
+        let orphan = Orphan {
+            scope: None,
+            process: Started::new(pid, true),
+        };
+        assert_eq!(
+            orphan.stop(Duration::from_secs(u64::MAX)),
+            Stopped::Terminated
+        );
     }
 
     #[test]
     fn stat_reads_the_state_and_start_time_past_a_name_with_parentheses() {
         let line = "42 (a) (b) c) S 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 10";
-        assert_eq!(parse_stat(line), Some(('S', Some(98765))));
+        assert_eq!(
+            parse_stat(line),
+            Some(Stat {
+                state: 'S',
+                group: 42,
+                since: Some(98765)
+            })
+        );
         assert_eq!(stat(-5), None);
     }
 }
