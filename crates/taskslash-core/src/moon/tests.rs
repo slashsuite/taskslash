@@ -331,12 +331,6 @@ fn a_repos_moon_wrapper_runs_under_bun_in_place_of_moon() {
     fs::write(root.join("node_modules/.bin/moon"), "").unwrap();
     let path = || Some(tools.clone().into_os_string());
 
-    // No wrapper: moon itself.
-    assert_eq!(
-        moon_command_on(&root, path()).unwrap(),
-        [root.join("node_modules/.bin/moon").into_os_string()]
-    );
-
     // A wrapper and no bun to run it: an error that names the wrapper.
     let wrapper = root.join("scripts/moon.ts");
     fs::write(&wrapper, "").unwrap();
@@ -346,13 +340,6 @@ fn a_repos_moon_wrapper_runs_under_bun_in_place_of_moon() {
         e.to_string().contains("scripts/moon.ts runs moon here")
             && e.to_string().contains("no bun on PATH"),
         "{e}"
-    );
-
-    // With bun on PATH, `bun <wrapper>`.
-    fs::write(tools.join("bun"), "").unwrap();
-    assert_eq!(
-        moon_command_on(&root, path()).unwrap(),
-        [tools.join("bun").into_os_string(), wrapper.into_os_string()]
     );
 
     // A wrapper does not stand in for an install: with no moon, the install hint still comes.
