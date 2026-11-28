@@ -69,6 +69,72 @@ fn a_shell_script_is_keyed_by_its_own_first_two_words() {
 }
 
 #[test]
+fn a_leading_cd_is_skipped_so_two_scripts_in_one_repo_keep_their_own_keys() {
+    let cargo = key(
+        None,
+        &words(&["sh", "-c", "cd /repo && cargo test --locked"]),
+    );
+    let bun = key(None, &words(&["sh", "-c", "cd /repo && bun test"]));
+    assert_eq!(cargo, "cargo test");
+    assert_eq!(bun, "bun test");
+    assert_eq!(
+        key(None, &words(&["bash", "-c", "cd a && cd b && make all"])),
+        "make all"
+    );
+    // A cd that is not followed by `&&`, or is the whole script, stays the command.
+    assert_eq!(
+        key(None, &words(&["sh", "-c", "cd /repo; cargo test"])),
+        "cd repo;"
+    );
+    assert_eq!(key(None, &words(&["sh", "-c", "cd /repo &&"])), "cd repo");
+}
+
+#[test]
+fn env_nice_and_timeout_are_unwrapped_to_the_command_they_run() {
+    for argv in [
+        &["env", "RUST_LOG=debug", "A=1", "cargo", "test"][..],
+        &["/usr/bin/env", "-i", "-u", "HOME", "--", "cargo", "test"],
+        &["nice", "cargo", "test"],
+        &["nice", "-n", "10", "cargo", "test"],
+        &["nice", "-5", "cargo", "test"],
+        &["nice", "--adjustment=19", "cargo", "test"],
+        &["timeout", "60", "cargo", "test"],
+        &[
+            "timeout",
+            "-s",
+            "KILL",
+            "--preserve-status",
+            "5m",
+            "cargo",
+            "test",
+        ],
+        &["timeout", "-k", "5", "--", "60", "cargo", "test"],
+        &["nice", "timeout", "60", "env", "A=1", "cargo", "test"],
+    ] {
+        assert_eq!(key(None, &words(argv)), "cargo test", "{argv:?}");
+    }
+    assert_eq!(
+        key(
+            None,
+            &words(&["sh", "-c", "cd /repo && nice -n 5 env A=1 bun test"])
+        ),
+        "bun test",
+        "inside a script too"
+    );
+    // A wrapper with nothing to run is the command itself.
+    assert_eq!(
+        key(None, &words(&["env", "-", "cargo", "test"])),
+        "cargo test"
+    );
+    assert_eq!(key(None, &words(&["env", "-S", "cargo test"])), "env -S");
+    assert_eq!(key(None, &words(&["env", "cargo", "-S"])), "cargo -S");
+    assert_eq!(key(None, &words(&["env"])), "env");
+    assert_eq!(key(None, &words(&["env", "A=1"])), "env A=1");
+    assert_eq!(key(None, &words(&["timeout", "60"])), "timeout 60");
+    assert_eq!(key(None, &words(&["nice", "-n", "5"])), "nice -n");
+}
+
+#[test]
 fn a_long_key_keeps_its_start_and_end_around_a_hash() {
     let long = "ob:cpu:browser:bunx moon run storybook:visual -- --all --group navigation";
     let shaped = key(Some(long), &[]);

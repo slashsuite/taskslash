@@ -52,7 +52,8 @@ enum Commands {
     Run {
         /// A name for the job: its key, which its estimate is learned under. Give one for anything
         /// run more than once. Without it the key is the command's first two words, or for
-        /// `sh -c '<script>'` (or bash, dash, zsh, ksh) the script's. In either, a path word
+        /// `sh -c '<script>'` (or bash, dash, zsh, ksh) the script's, past a leading `cd <dir> &&`
+        /// and inside env, nice and timeout. In either, a path word
         /// (`/`, `./`, `../`, `~/`) is cut to its last part, and a key over 60 characters keeps
         /// its start and end around a short hash of it.
         #[arg(long)]
