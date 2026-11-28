@@ -20,6 +20,11 @@ tasks:
     command: "cargo build --locked"
   test:
     command: "cargo test --locked"
+    # CI's user session decides which launch path the tests prove, so the step that starts it and
+    # the variable that requires it are part of the hash: changing either re-runs the tests.
+    inputs:
+      - "$TASKSLASH_REQUIRE_SCOPE"
+      - "/.github/workflows/ci.yml"
   lint:
     command: "cargo clippy --locked --all-targets -- -D warnings"
   format-check:
