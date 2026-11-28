@@ -15,3 +15,8 @@ tasks:
   # Passes only when the repository's moon wrapper (scripts/moon.ts, which the test writes) ran it.
   wrapped:
     script: 'test "$FIXTURE_WRAPPED" = yes'
+  # Runs until it is stopped, for the test that kills its client.
+  hang:
+    command: "sleep 600"
+    options:
+      cache: false

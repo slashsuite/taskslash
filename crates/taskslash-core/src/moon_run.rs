@@ -2,7 +2,7 @@
 //! daemon decides how many run at once instead of moon's `--concurrency`.
 
 use crate::Error;
-use crate::capture::{Stop, pump};
+use crate::capture::{Stop, pump, spawn_gated};
 use crate::client::{Demand, Job, Report, run_job};
 use crate::moon::{self, Node};
 use crate::protocol::Class;
@@ -268,11 +268,10 @@ fn exec(
     mut log: Option<File>,
     stop: &Arc<Stop>,
 ) -> io::Result<(ExitStatus, bool)> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    // moon shares this process's group, so a cancel signals moon itself, which stops its task.
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // moon shares this process's group, so a cancel signals moon and what it started. Held before
+    // exec until the daemon knows its pid, so a client killed in between leaves no moon running.
+    let mut child = spawn_gated(&mut command, stop, false)?;
     stop.started(libc::pid_t::try_from(child.id()).unwrap_or(0), false);
     let mut sources = Vec::new();
     // Whether each source is stdout (else stderr).
