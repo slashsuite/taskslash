@@ -10,9 +10,10 @@
 
 use crate::phases::{self, Phases};
 use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -370,17 +371,29 @@ impl Stop {
             .announce = Some(Box::new(announce));
     }
 
-    /// The command started as process `pid`, leading a process group of its own when `group`. A
-    /// stop asked for earlier is sent now.
-    pub(crate) fn started(self: &Arc<Self>, pid: libc::pid_t, group: bool) {
-        let (pending, announce) = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.target = Some((pid, group));
-            (state.pending.take(), state.announce.take())
-        };
+    /// Tells `announce` the command's pid now, if it has not been told yet: before the command is
+    /// let run, so the daemon knows what to stop should the client die in between.
+    fn announce_now(&self, pid: libc::pid_t, group: bool) {
+        let announce = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .announce
+            .take();
         if let Some(announce) = announce {
             announce(pid, group);
         }
+    }
+
+    /// The command started as process `pid`, leading a process group of its own when `group`. A
+    /// stop asked for earlier is sent now.
+    pub(crate) fn started(self: &Arc<Self>, pid: libc::pid_t, group: bool) {
+        let pending = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.target = Some((pid, group));
+            state.pending.take()
+        };
+        self.announce_now(pid, group);
         if let Some(grace) = pending {
             self.term_then_kill(grace);
         }
@@ -392,6 +405,68 @@ impl Stop {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .ended = true;
+    }
+}
+
+/// Holds the command between fork and exec until the daemon has been told its pid. The pid is only
+/// known once the command is forked, and a client killed between the fork and its `running`
+/// message would leave a command the daemon cannot find (on the plain path nothing else holds it).
+/// So the forked child writes its pid to a socket and waits; a thread here announces the pid and
+/// then lets it go. A client that dies first closes its end, and the child exits without ever
+/// running the command.
+struct Gate {
+    /// The parent's copy of the child's end, closed once the child is forked.
+    theirs: UnixStream,
+    waiter: thread::JoinHandle<()>,
+}
+
+impl Gate {
+    /// Adds the wait to `command`'s pre-exec steps, after the ones already there (so the child
+    /// already leads its group when it is announced), and starts the thread that releases it.
+    fn hold(command: &mut Command, stop: &Arc<Stop>) -> io::Result<Self> {
+        let (mut ours, theirs) = UnixStream::pair()?;
+        let fds = (ours.as_raw_fd(), theirs.as_raw_fd());
+        // SAFETY: the closure runs in the forked child before exec and only makes
+        // async-signal-safe calls (close, getpid, write, read).
+        unsafe {
+            command.pre_exec(move || {
+                let (ours, theirs) = fds;
+                // Only the client may hold the other end, so its death reads as EOF here.
+                libc::close(ours);
+                let pid = libc::getpid().to_ne_bytes();
+                // Four bytes into an empty socket buffer are written whole or not at all.
+                if libc::write(theirs, pid.as_ptr().cast(), pid.len()) != 4 {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut byte = 0_u8;
+                loop {
+                    match libc::read(theirs, (&raw mut byte).cast(), 1) {
+                        1 => return Ok(()),
+                        -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+                        -1 => return Err(io::Error::last_os_error()),
+                        // The client went away before it could announce the command.
+                        _ => return Err(io::Error::from_raw_os_error(libc::ECANCELED)),
+                    }
+                }
+            });
+        }
+        let stop = Arc::clone(stop);
+        let waiter = thread::spawn(move || {
+            let mut pid = [0_u8; 4];
+            // EOF: the fork failed, and nothing waits on the gate.
+            if ours.read_exact(&mut pid).is_ok() {
+                stop.announce_now(libc::pid_t::from_ne_bytes(pid), true);
+                let _ = ours.write_all(&[1]);
+            }
+        });
+        Ok(Self { theirs, waiter })
+    }
+
+    /// Once the spawn has returned: closes the parent's copy of the child's end (so a failed fork
+    /// ends the thread's wait) and waits for the thread.
+    fn close(self) {
+        drop(self.theirs);
+        let _ = self.waiter.join();
     }
 }
 
@@ -537,7 +612,11 @@ pub(crate) fn run(
     // The stdin copy writes to a master of its own, which outlives the copy loop's.
     let to_master = master.as_ref().map(OwnedFd::try_clone).transpose()?;
     let forwarder = Forwarder::start(master.as_ref().map(OwnedFd::try_clone).transpose()?);
-    let mut child = command.spawn()?;
+    // After the forwarder, so the gate's thread inherits the held signals.
+    let gate = Gate::hold(&mut command, stop)?;
+    let spawned = command.spawn();
+    gate.close();
+    let mut child = spawned?;
     phases::mark(phases, "launch");
     // The command's copies of the terminal's other end are closed with it, so reading the master
     // ends when the command and what it started are gone.
@@ -682,13 +761,13 @@ fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stop, pump};
+    use super::{Gate, Stop, pump};
     use std::io::{BufRead, BufReader};
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -734,6 +813,43 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("the copy waited for done with every output at its end");
         assert_eq!(copied, [b"out".to_vec(), b"err".to_vec()]);
+    }
+
+    #[test]
+    fn the_command_does_not_run_until_its_pid_is_announced() {
+        // Before, the pid was announced after the spawn returned, so the command could already have
+        // run (and its client have died) by then; a client killed there left a command nobody knew.
+        let dir = std::env::temp_dir().join(format!("tk-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let stop = Arc::new(Stop::default());
+        let ran_first = Arc::new(Mutex::new(None));
+        {
+            let (ran_first, marker) = (Arc::clone(&ran_first), marker.clone());
+            stop.announce(move |pid, group| {
+                assert!(group);
+                assert!(pid > 1);
+                thread::sleep(Duration::from_millis(300));
+                *ran_first.lock().unwrap() = Some(marker.exists());
+            });
+        }
+        let mut command = Command::new("touch");
+        command
+            .arg(&marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let gate = Gate::hold(&mut command, &stop).unwrap();
+        let spawned = command.spawn();
+        gate.close();
+        assert!(spawned.unwrap().wait().unwrap().success());
+        assert_eq!(
+            *ran_first.lock().unwrap(),
+            Some(false),
+            "the command ran before it was announced, or was never announced"
+        );
+        assert!(marker.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
