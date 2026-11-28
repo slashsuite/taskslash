@@ -379,14 +379,16 @@ fn processes_in(dir: &Path, except: u32) -> Vec<String> {
         .collect()
 }
 
-/// A `taskslash moon` killed as soon as the daemon has admitted its target, so mostly while it
-/// forks moon and before it has told the daemon moon's pid: no moon and nothing it started is left
-/// running, and the daemon frees the job. (The daemon runs in the workspace too.)
+/// A `taskslash moon` killed after it forks moon and before it has told the daemon moon's pid (the
+/// test hook holds it there for a second and says when it is): no moon and nothing it started is
+/// left running, and the daemon frees the job. (The daemon runs in the workspace too.)
 fn a_moon_whose_client_is_killed_leaves_nothing_running(launch: Option<&str>) {
     let daemon = Scratch::new().daemon_on(launch);
     let scratch = &daemon.scratch;
+    let forked = scratch.dir.join("forked");
     let mut client = scratch
         .command(BIN, &["moon", "b:hang"])
+        .env("TASKSLASH_TEST_ANNOUNCE_PAUSE", &forked)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -398,8 +400,8 @@ fn a_moon_whose_client_is_killed_leaves_nothing_running(launch: Option<&str>) {
         status["jobs"].as_array().cloned().unwrap_or_default()
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !jobs().iter().any(|job| job["key"] == "fixture/b:hang") {
-        assert!(Instant::now() < deadline, "b:hang was never admitted");
+    while !forked.exists() {
+        assert!(Instant::now() < deadline, "b:hang's moon was never forked");
         thread::sleep(Duration::from_millis(5));
     }
     client.kill().unwrap();
