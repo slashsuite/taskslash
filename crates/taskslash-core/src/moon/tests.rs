@@ -313,6 +313,51 @@ fn the_root_and_the_repository_name() {
     let bin = main.join("node_modules/.bin");
     fs::create_dir_all(&bin).unwrap();
     fs::write(bin.join("moon"), "").unwrap();
-    assert_eq!(moon_binary(&main).unwrap(), bin.join("moon"));
+    assert_eq!(
+        moon_command(&main).unwrap(),
+        [bin.join("moon").into_os_string()]
+    );
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_repos_moon_wrapper_runs_under_bun_in_place_of_moon() {
+    let base = std::env::temp_dir().join(format!("tks-wrap-{}", std::process::id()));
+    let root = base.join("shop");
+    let tools = base.join("tools");
+    fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(root.join("node_modules/.bin/moon"), "").unwrap();
+    let path = || Some(tools.clone().into_os_string());
+
+    // No wrapper: moon itself.
+    assert_eq!(
+        moon_command_on(&root, path()).unwrap(),
+        [root.join("node_modules/.bin/moon").into_os_string()]
+    );
+
+    // A wrapper and no bun to run it: an error that names the wrapper.
+    let wrapper = root.join("scripts/moon.ts");
+    fs::write(&wrapper, "").unwrap();
+    let e = moon_command_on(&root, path()).unwrap_err();
+    assert!(!e.is_usage(), "{e}");
+    assert!(
+        e.to_string().contains("scripts/moon.ts runs moon here")
+            && e.to_string().contains("no bun on PATH"),
+        "{e}"
+    );
+
+    // With bun on PATH, `bun <wrapper>`.
+    fs::write(tools.join("bun"), "").unwrap();
+    assert_eq!(
+        moon_command_on(&root, path()).unwrap(),
+        [tools.join("bun").into_os_string(), wrapper.into_os_string()]
+    );
+
+    // A wrapper does not stand in for an install: with no moon, the install hint still comes.
+    fs::remove_file(root.join("node_modules/.bin/moon")).unwrap();
+    let e = moon_command_on(&root, path()).unwrap_err();
+    assert!(e.to_string().contains("bun install"), "{e}");
     fs::remove_dir_all(&base).unwrap();
 }

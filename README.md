@@ -141,7 +141,11 @@ is blind to the other gates on the machine: three gates at once are nine heavy t
 target is its own job, so the daemon's budget decides how many run at once, across every worktree.
 
 It finds the workspace (the first directory from here up with `.moon/workspace.yml`) and its moon
-(`node_modules/.bin/moon` there, else `moon` on `PATH`), and reads `moon query tasks`. A target is
+(`node_modules/.bin/moon` there, else `moon` on `PATH`), and reads `moon query tasks`. A workspace
+whose root has `scripts/moon.ts` runs moon through that wrapper instead: every moon command below
+(the query and each target's `moon run`) runs as `bun scripts/moon.ts <the same arguments>`, the way
+the repository's own scripts call it, so whatever the wrapper sets up (a toolchain found and put
+first on `PATH`, a variable a task hashes) holds under TaskSlash too. A target is
 `:<task>` (that task in every project that has it) or `<project>:<task>`; anything else, or one that
 matches nothing, is a usage error (exit 2). One that matches nothing is followed by what exists: the
 projects that have that task (`projects with test: cli, web`, at most 12), or, when only the task is

@@ -64,9 +64,15 @@ pub fn moon(
             ))
         })?
         .to_path_buf();
-    let binary = moon::moon_binary(&root)?;
-    let mut query = Command::new(&binary);
+    let moon = moon::moon_command(&root)?;
+    let shown = moon
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut query = Command::new(&moon[0]);
     query
+        .args(&moon[1..])
         .args(["query", "tasks"])
         .current_dir(&root)
         .stdin(Stdio::null())
@@ -76,11 +82,10 @@ pub fn moon(
     }
     let output = query
         .output()
-        .map_err(|e| Error::new(format!("cannot run {}: {e}", binary.display())))?;
+        .map_err(|e| Error::new(format!("cannot run {shown}: {e}")))?;
     if !output.status.success() {
         return Err(Error::new(format!(
-            "{} query tasks failed: {}",
-            binary.display(),
+            "{shown} query tasks failed: {}",
             output.status
         )));
     }
@@ -89,7 +94,7 @@ pub fn moon(
     let repo = moon::repo_name(&root);
 
     let ends = schedule(&nodes, |node| {
-        run_node(socket, &root, &binary, &repo, node, force, class)
+        run_node(socket, &root, &moon, &repo, node, force, class)
     });
 
     let mut out = io::stdout().lock();
@@ -191,23 +196,24 @@ fn schedule(nodes: &[Node], run: impl Fn(&Node) -> End + Sync) -> Vec<End> {
         .collect()
 }
 
-/// Runs one node as a daemon job: `<moon> run <target> --upstream none [--force]`.
+/// Runs one node as a daemon job: `<moon> run <target> --upstream none [--force]`, `moon` being
+/// the command that stands for moon (`moon::moon_command`).
 fn run_node(
     socket: &Path,
     root: &Path,
-    binary: &Path,
+    moon: &[OsString],
     repo: &str,
     node: &Node,
     force: bool,
     class: Class,
 ) -> End {
-    let mut argv: Vec<OsString> = vec![
-        binary.into(),
+    let mut argv: Vec<OsString> = moon.to_vec();
+    argv.extend([
         "run".into(),
         node.target.clone().into(),
         "--upstream".into(),
         "none".into(),
-    ];
+    ]);
     if force {
         argv.push("--force".into());
     }
